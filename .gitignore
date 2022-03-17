@@ -154,3 +154,5 @@ data
 public_data
 exp
 tmp
+
+.models/utils/gen_camera_rays.py
