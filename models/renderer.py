@@ -21,6 +21,11 @@ def extract_fields(bound_min, bound_max, resolution, query_func):
                     xx, yy, zz = torch.meshgrid(xs, ys, zs)
                     pts = torch.cat([xx.reshape(-1, 1), yy.reshape(-1, 1), zz.reshape(-1, 1)], dim=-1)
                     val = query_func(pts).reshape(len(xs), len(ys), len(zs)).detach().cpu().numpy()
+                    # maybe replace the row before
+                    # dis = torch.linalg.norm(pts, ord=2, dim=-1, keepdim=False)
+                    # val = query_func(pts).reshape(-1)
+                    # val[torch.where(dis > 1.0)] = -1.0
+                    # val = val.reshape(len(xs), len(ys), len(zs)).detach().cpu().numpy()
                     u[xi * N: xi * N + len(xs), yi * N: yi * N + len(ys), zi * N: zi * N + len(zs)] = val
     return u
 
@@ -120,12 +125,14 @@ class NeuSRenderer:
         color = (weights[:, :, None] * sampled_color).sum(dim=1)
         if background_rgb is not None:
             color = color + background_rgb * (1.0 - weights.sum(dim=-1, keepdim=True))
+        depth_map = torch.sum(weights * z_vals, dim=2)
 
         return {
             'color': color,
             'sampled_color': sampled_color,
             'alpha': alpha,
             'weights': weights,
+            'depth_map': depth_map,
         }
 
     def up_sample(self, rays_o, rays_d, z_vals, sdf, n_importance, inv_s):

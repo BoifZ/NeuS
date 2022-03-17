@@ -8,6 +8,7 @@ from glob import glob
 
 if __name__ == '__main__':
     work_dir = sys.argv[1]
+    # work_dir += '/dense/0'
     poses_hwf = np.load(os.path.join(work_dir, 'poses.npy')) # n_images, 3, 5
     poses_raw = poses_hwf[:, :, :4]
     hwf = poses_hwf[:, :, 4]
@@ -33,6 +34,7 @@ if __name__ == '__main__':
     convert_mat[2, 2] =-1.0
     convert_mat[3, 3] = 1.0
 
+    print(n_images)
     for i in range(n_images):
         pose = np.diag([1.0, 1.0, 1.0, 1.0]).astype(np.float32)
         pose[:3, :4] = poses_raw[i]
@@ -68,13 +70,20 @@ if __name__ == '__main__':
     os.makedirs(os.path.join(out_dir, 'image'), exist_ok=True)
     os.makedirs(os.path.join(out_dir, 'mask'), exist_ok=True)
 
-    image_list = glob(os.path.join(work_dir, 'images/*.png'))
+    image_list = glob(os.path.join(work_dir, 'preprocessed/image/*[.png]'))
     image_list.sort()
 
+    print('work_dir', work_dir,'images #', len(image_list))
+    train_res = (1920, 1080)
     for i, image_path in enumerate(image_list):
         img = cv.imread(image_path)
+        # print(img.shape)
+        # H, W, _ = img.shape
+        
+        img = cv.resize(img, train_res)
         cv.imwrite(os.path.join(out_dir, 'image', '{:0>3d}.png'.format(i)), img)
         cv.imwrite(os.path.join(out_dir, 'mask', '{:0>3d}.png'.format(i)), np.ones_like(img) * 255)
 
     np.savez(os.path.join(out_dir, 'cameras_sphere.npz'), **cam_dict)
     print('Process done!')
+

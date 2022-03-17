@@ -1,5 +1,6 @@
 import numpy as np
 import os
+import shutil
 import sys
 import imageio
 import skimage.transform
@@ -10,7 +11,7 @@ import colmap_read_model as read_model
 
 
 def load_colmap_data(realdir):
-    
+    print('[Info]loading colmap data from folder ', os.path.join(realdir, 'sparse/0'))
     camerasfile = os.path.join(realdir, 'sparse/0/cameras.bin')
     camdata = read_model.read_cameras_binary(camerasfile)
     
@@ -25,19 +26,24 @@ def load_colmap_data(realdir):
     
     imagesfile = os.path.join(realdir, 'sparse/0/images.bin')
     imdata = read_model.read_images_binary(imagesfile)
+    # print(len(imdata))
     
     w2c_mats = []
     bottom = np.array([0,0,0,1.]).reshape([1,4])
     
+    exists_img = {}
     names = [imdata[k].name for k in imdata]
-    print( 'Images #', len(names))
+    print( '[Info] Images #', len(names))
     perm = np.argsort(names)
-    for k in imdata:
+    for cnt, k in enumerate(imdata):
+        exists_img[imdata[k].id] = cnt
+        # exists_img.append(imdata[k].id)
         im = imdata[k]
         R = im.qvec2rotmat()
         t = im.tvec.reshape([3,1])
         m = np.concatenate([np.concatenate([R, t], 1), bottom], 0)
         w2c_mats.append(m)
+    print('[Info] exists_img', exists_img)
     
     w2c_mats = np.stack(w2c_mats, 0)
     c2w_mats = np.linalg.inv(w2c_mats)
@@ -51,21 +57,30 @@ def load_colmap_data(realdir):
     # must switch to [-u, r, -t] from [r, -u, t], NOT [r, u, -t]
     poses = np.concatenate([poses[:, 1:2, :], poses[:, 0:1, :], -poses[:, 2:3, :], poses[:, 3:4, :], poses[:, 4:5, :]], 1)
     
-    return poses, pts3d, perm
+    # print('[debug] c2w_mats', c2w_mats[0])
+    # print('[debug] w2c_mats', w2c_mats[0])
+    return poses, pts3d, perm, exists_img, np.array(names, dtype=str)
 
 
-def save_poses(basedir, poses, pts3d, perm):
+def save_poses(basedir, poses, pts3d, perm, exists_img):
     pts_arr = []
     vis_arr = []
+    # print(poses.shape[-1])
     for k in pts3d:
-        pts_arr.append(pts3d[k].xyz)
+        flag = False
         cams = [0] * poses.shape[-1]
         for ind in pts3d[k].image_ids:
-            if len(cams) < ind - 1:
+            i_idx = exists_img[ind]
+            if len(cams) <= i_idx - 1: 
+                print(pts3d[k].image_ids)
+                continue
                 print('ERROR: the correct camera poses for current points cannot be accessed')
                 return
-            cams[ind-1] = 1
-        vis_arr.append(cams)
+            flag = True
+            cams[i_idx-1] = 1
+        if flag:
+            pts_arr.append(pts3d[k].xyz)
+            vis_arr.append(cams)
 
     pts = np.stack(pts_arr, axis=0)
     pcd = trimesh.PointCloud(pts)
@@ -127,8 +142,6 @@ def minify_v0(basedir, factors=[], resolutions=[]):
             imageio.imwrite(os.path.join(imgdir, 'image{:03d}.png'.format(i)), (255*imgs_down[i]).astype(np.uint8))
             
 
-
-
 def minify(basedir, factors=[], resolutions=[]):
     needtoload = False
     for r in factors:
@@ -180,8 +193,6 @@ def minify(basedir, factors=[], resolutions=[]):
             print('Removed duplicates')
         print('Done')
             
-        
-        
         
 def load_data(basedir, factor=None, width=None, height=None, load_imgs=True):
     
@@ -241,27 +252,39 @@ def load_data(basedir, factor=None, width=None, height=None, load_imgs=True):
     
     print('Loaded image data', imgs.shape, poses[:,-1,0])
     return poses, bds, imgs
+
+
+def move_images(basedir, names):
+    for i, n in enumerate(names):
+        origin_path = os.path.join(basedir, 'images', n)
+        new_dir = os.path.join(basedir,'preprocessed/image')
+        if not os.path.exists(new_dir):
+            os.makedirs(new_dir)
+        shutil.copyfile(origin_path, os.path.join(new_dir, '{:0>3d}.png'.format(i)))
             
     
 def gen_poses(basedir, match_type, factors=None):
-    
+    print('[Info] base_dir:', basedir)
     files_needed = ['{}.bin'.format(f) for f in ['cameras', 'images', 'points3D']]
     if os.path.exists(os.path.join(basedir, 'sparse/0')):
+        print('exists')
         files_had = os.listdir(os.path.join(basedir, 'sparse/0'))
     else:
         files_had = []
     if not all([f in files_had for f in files_needed]):
         print( 'Need to run COLMAP' )
+        exit(111)
         run_colmap(basedir, match_type)
     else:
         print('Don\'t need to run COLMAP')
         
     print('Post-colmap')
     
-    poses, pts3d, perm = load_colmap_data(basedir)
+    poses, pts3d, perm, exists_img, names = load_colmap_data(basedir)
+    names = names[perm]
+    move_images(basedir, names)
 
-
-    save_poses(basedir, poses, pts3d, perm)
+    save_poses(basedir, poses, pts3d, perm, exists_img)
     
     if factors is not None:
         print( 'Factors:', factors)

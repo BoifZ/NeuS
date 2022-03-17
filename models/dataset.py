@@ -1,10 +1,10 @@
 import torch
-import torch.nn.functional as F
+# import torch.nn.functional as F
 import cv2 as cv
 import numpy as np
 import os
 from glob import glob
-from icecream import ic
+# from icecream import ic
 from scipy.spatial.transform import Rotation as Rot
 from scipy.spatial.transform import Slerp
 
@@ -42,28 +42,35 @@ class Dataset:
         self.conf = conf
 
         self.data_dir = conf.get_string('data_dir')
+        self.img_folder = conf.get_string('img_folder')
+        img_folder = os.path.join(self.data_dir, self.img_folder)
         self.render_cameras_name = conf.get_string('render_cameras_name')
         self.object_cameras_name = conf.get_string('object_cameras_name')
 
         self.camera_outside_sphere = conf.get_bool('camera_outside_sphere', default=True)
         self.scale_mat_scale = conf.get_float('scale_mat_scale', default=1.1)
 
-        camera_dict = np.load(os.path.join(self.data_dir, self.render_cameras_name))
+        camera_dict = np.load(os.path.join(img_folder, self.render_cameras_name))
         self.camera_dict = camera_dict
-        self.images_lis = sorted(glob(os.path.join(self.data_dir, 'image/*.png')))
+        self.images_lis = sorted(glob(os.path.join(img_folder, 'image/*.png')))
         self.n_images = len(self.images_lis)
         self.images_np = np.stack([cv.imread(im_name) for im_name in self.images_lis]) / 256.0
-        self.masks_lis = sorted(glob(os.path.join(self.data_dir, 'mask/*.png')))
+        self.masks_lis = sorted(glob(os.path.join(img_folder, 'mask/*.png')))
         self.masks_np = np.stack([cv.imread(im_name) for im_name in self.masks_lis]) / 256.0
+        # print(self.n_images)
+        # print(camera_dict)
 
         # world_mat is a projection matrix from world to image
         self.world_mats_np = [camera_dict['world_mat_%d' % idx].astype(np.float32) for idx in range(self.n_images)]
 
         self.scale_mats_np = []
-
         # scale_mat: used for coordinate normalization, we assume the scene to render is inside a unit sphere at origin.
         self.scale_mats_np = [camera_dict['scale_mat_%d' % idx].astype(np.float32) for idx in range(self.n_images)]
 
+        # camera_infos = np.load(os.path.join(img_folder, 'RT_mats.npy'))
+        # camera_infos = np.load(os.path.join(img_folder, 'w2c_mats.npy'))
+        # self.intrinsics_all = [camera_infos['intrinsic_mat_%d' % idx].astype(np.float32) for idx in range(self.n_images)]
+        # self.pose_all = [camera_infos['pose_mat_%d' % idx].astype(np.float32) for idx in range(self.n_images)]
         self.intrinsics_all = []
         self.pose_all = []
 
@@ -86,7 +93,7 @@ class Dataset:
         object_bbox_min = np.array([-1.01, -1.01, -1.01, 1.0])
         object_bbox_max = np.array([ 1.01,  1.01,  1.01, 1.0])
         # Object scale mat: region of interest to **extract mesh**
-        object_scale_mat = np.load(os.path.join(self.data_dir, self.object_cameras_name))['scale_mat_0']
+        object_scale_mat = np.load(os.path.join(img_folder, self.object_cameras_name))['scale_mat_0']
         object_bbox_min = np.linalg.inv(self.scale_mats_np[0]) @ object_scale_mat @ object_bbox_min[:, None]
         object_bbox_max = np.linalg.inv(self.scale_mats_np[0]) @ object_scale_mat @ object_bbox_max[:, None]
         self.object_bbox_min = object_bbox_min[:3, 0]
@@ -166,6 +173,6 @@ class Dataset:
         return near, far
 
     def image_at(self, idx, resolution_level):
-        img = cv.imread(self.images_lis[idx])
-        return (cv.resize(img, (self.W // resolution_level, self.H // resolution_level))).clip(0, 255)
+        img = self.images_np[idx]
+        return (cv.resize(img, (self.W // resolution_level, self.H // resolution_level))*255).clip(0, 255)
 

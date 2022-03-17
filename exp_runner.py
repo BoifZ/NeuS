@@ -15,6 +15,7 @@ from pyhocon import ConfigFactory
 from models.dataset import Dataset
 from models.fields import RenderingNetwork, SDFNetwork, SingleVarianceNetwork, NeRF
 from models.renderer import NeuSRenderer
+from models.poses import LearnPose, LearnIntrin, RaysGenerator
 
 
 class Runner:
@@ -34,6 +35,7 @@ class Runner:
         os.makedirs(self.base_exp_dir, exist_ok=True)
         self.dataset = Dataset(self.conf['dataset'])
         self.iter_step = 0
+        self.poses_iter_step = 0
 
         # Training parameters
         self.end_iter = self.conf.get_int('train.end_iter')
@@ -48,6 +50,9 @@ class Runner:
         self.use_white_bkgd = self.conf.get_bool('train.use_white_bkgd')
         self.warm_up_end = self.conf.get_float('train.warm_up_end', default=0.0)
         self.anneal_end = self.conf.get_float('train.anneal_end', default=0.0)
+
+        # self.start_refine_pose_iter = self.conf.get_int('train.start_refine_pose_iter')
+        # self.start_refine_pose_iter = self.conf.get_int('train.start_refine_focal_epoch')
 
         # Weights
         self.igr_weight = self.conf.get_float('train.igr_weight')
@@ -68,14 +73,27 @@ class Runner:
         params_to_train += list(self.deviation_network.parameters())
         params_to_train += list(self.color_network.parameters())
 
-        self.optimizer = torch.optim.Adam(params_to_train, lr=self.learning_rate)
-
         self.renderer = NeuSRenderer(self.nerf_outside,
                                      self.sdf_network,
                                      self.deviation_network,
                                      self.color_network,
                                      **self.conf['model.neus_renderer'])
 
+        self.optimizer = torch.optim.Adam(params_to_train, lr=self.learning_rate)
+
+        # learn focal parameter
+        self.intrin_net = LearnIntrin(self.dataset.H, self.dataset.W, self.conf['model.focal'], init_focal=self.dataset.intrinsics_all).to(self.device)
+        # learn pose for each image
+        self.pose_param_net = LearnPose(self.dataset.n_images, self.conf['model.pose'], init_c2w=self.dataset.pose_all).to(self.device)
+        self.optimizer_focal = torch.optim.Adam(self.intrin_net.parameters(), lr=args.focal_lr)
+        self.optimizer_pose = torch.optim.Adam(self.pose_param_net.parameters(), lr=args.pose_lr)
+
+        self.scheduler_focal = torch.optim.lr_scheduler.MultiStepLR(self.optimizer_focal, milestones=self.warm_up_end,
+                                                            gamma=self.focal_lr_gamma)
+        self.scheduler_pose = torch.optim.lr_scheduler.MultiStepLR(self.optimizer_pose, milestones=self.warm_up_end,
+                                                            gamma=self.pose_lr_gamma)
+
+        self.rays_generator = RaysGenerator(self.dataset.H, self.dataset.W, self.pose_param_net, self.intrin_net)
         # Load checkpoint
         latest_model_name = None
         if is_continue:
@@ -101,8 +119,25 @@ class Runner:
         res_step = self.end_iter - self.iter_step
         image_perm = self.get_image_perm()
 
+        if self.poses_iter_step >= self.start_refine_pose_iter:
+            self.pose_param_net.train()
+        else:
+            self.pose_param_net.eval()
+
+        if self.poses_iter_step >= self.start_refine_focal_epoch:
+            self.intrin_net.train()
+        else:
+            self.intrin_net.eval()
+        
         for iter_i in tqdm(range(res_step)):
-            data = self.dataset.gen_random_rays_at(image_perm[self.iter_step % len(image_perm)], self.batch_size)
+            if self.poses_iter_step >= self.start_refine_pose_iter:
+                self.pose_param_net.train()
+            if self.poses_iter_step >= self.start_refine_focal_epoch:
+                self.intrin_net.train()
+
+            img_idx = image_perm[self.iter_step % len(image_perm)]
+            # data = self.dataset.gen_random_rays_at(image_perm[self.iter_step % len(image_perm)], self.batch_size)
+            data = self.rays_generator.gen_random_rays_at(image_perm[self.iter_step % len(image_perm)], self.batch_size)
 
             rays_o, rays_d, true_rgb, mask = data[:, :3], data[:, 3: 6], data[:, 6: 9], data[:, 9: 10]
             near, far = self.dataset.near_far_from_sphere(rays_o, rays_d)
@@ -146,6 +181,7 @@ class Runner:
             self.optimizer.step()
 
             self.iter_step += 1
+            # self.poses_iter_step += 1
 
             self.writer.add_scalar('Loss/loss', loss, self.iter_step)
             self.writer.add_scalar('Loss/color_loss', color_fine_loss, self.iter_step)
@@ -154,13 +190,17 @@ class Runner:
             self.writer.add_scalar('Statistics/cdf', (cdf_fine[:, :1] * mask).sum() / mask_sum, self.iter_step)
             self.writer.add_scalar('Statistics/weight_max', (weight_max * mask).sum() / mask_sum, self.iter_step)
             self.writer.add_scalar('Statistics/psnr', psnr, self.iter_step)
-
             if self.iter_step % self.report_freq == 0:
                 print(self.base_exp_dir)
                 print('iter:{:8>d} loss = {} lr={}'.format(self.iter_step, loss, self.optimizer.param_groups[0]['lr']))
 
             if self.iter_step % self.save_freq == 0:
                 self.save_checkpoint()
+                self.save_pnf_checkpoint()
+
+            # pose_history_milestone = list(range(0, 100, 5)) + list(range(100, 1000, 100)) + list(range(1000, 10000, 1000))
+            # if self.poses_iter_step in pose_history_milestone:
+            #     self.save_pnf_checkpoint()
 
             if self.iter_step % self.val_freq == 0:
                 self.validate_image()
@@ -193,6 +233,9 @@ class Runner:
         for g in self.optimizer.param_groups:
             g['lr'] = self.learning_rate * learning_factor
 
+        self.scheduler_focal.step()
+        self.scheduler_pose.step()
+
     def file_backup(self):
         dir_lis = self.conf['general.recording']
         os.makedirs(os.path.join(self.base_exp_dir, 'recording'), exist_ok=True)
@@ -214,6 +257,7 @@ class Runner:
         self.color_network.load_state_dict(checkpoint['color_network_fine'])
         self.optimizer.load_state_dict(checkpoint['optimizer'])
         self.iter_step = checkpoint['iter_step']
+        self.load_pnf_checkpoint(checkpoint_name.replace('ckpt', 'pnf'))
 
         logging.info('End')
 
@@ -230,6 +274,41 @@ class Runner:
         os.makedirs(os.path.join(self.base_exp_dir, 'checkpoints'), exist_ok=True)
         torch.save(checkpoint, os.path.join(self.base_exp_dir, 'checkpoints', 'ckpt_{:0>6d}.pth'.format(self.iter_step)))
 
+    def load_pnf_checkpoint(self, checkpoint_name):
+        checkpoint = torch.load(os.path.join(self.base_exp_dir, 'pnf_checkpoints', checkpoint_name), map_location=self.device)
+        self.intrin_net.load_state_dict(checkpoint['intrin_net'])
+        self.pose_param_net.load_state_dict(checkpoint['pose_param_net'])
+        self.optimizer_focal.load_state_dict(checkpoint['optimizer_focal'])
+        self.optimizer_pose.load_state_dict(checkpoint['optimizer_pose'])
+        self.optimizer.load_state_dict(checkpoint['optimizer'])
+        self.poses_iter_step = checkpoint['poses_iter_step']
+
+    def save_pnf_checkpoint(self):
+        pnf_checkpoint = {
+            'intrin_net': self.intrin_net,
+            'pose_param_net': self.pose_param_net,
+            'optimizer_focal': self.optimizer_focal,
+            'optimizer_pose': self.optimizer_pose,
+            'poses_iter_step': self.poses_iter_step,
+        }
+
+        os.makedirs(os.path.join(self.base_exp_dir, 'pnf_checkpoints'), exist_ok=True)
+        torch.save(pnf_checkpoint, os.path.join(self.base_exp_dir, 'pnf_checkpoints', 'pnf_{:0>6d}.pth'.format(self.iter_step)))
+
+    def store_current_pose(self):
+        self.pose_net.eval()
+        num_cams = self.pose_net.module.num_cams if isinstance(self.pose_net, torch.nn.DataParallel) else pose_net.num_cams
+
+        c2w_list = []
+        for i in range(num_cams):
+            c2w = self.pose_net(i)  # (4, 4)
+            c2w_list.append(c2w)
+            
+        c2w_list = torch.stack(c2w_list)  # (N, 4, 4)
+        c2w_list = c2w_list.detach().cpu().numpy()
+        np.save(os.path.join(self.base_exp_dir, 'cam_poses', 'pose_{:0>6d}.npy'.format(self.iter_step)), c2w_list)
+        return
+
     def validate_image(self, idx=-1, resolution_level=-1):
         if idx < 0:
             idx = np.random.randint(self.dataset.n_images)
@@ -238,7 +317,8 @@ class Runner:
 
         if resolution_level < 0:
             resolution_level = self.validate_resolution_level
-        rays_o, rays_d = self.dataset.gen_rays_at(idx, resolution_level=resolution_level)
+        # rays_o, rays_d = self.dataset.gen_rays_at(idx, resolution_level=resolution_level)
+        rays_o, rays_d = self.rays_generator.gen_rays_at(idx, resolution_level=resolution_level)
         H, W, _ = rays_o.shape
         rays_o = rays_o.reshape(-1, 3).split(self.batch_size)
         rays_d = rays_d.reshape(-1, 3).split(self.batch_size)
@@ -301,7 +381,8 @@ class Runner:
         """
         Interpolate view between two cameras.
         """
-        rays_o, rays_d = self.dataset.gen_rays_between(idx_0, idx_1, ratio, resolution_level=resolution_level)
+        # rays_o, rays_d = self.dataset.gen_rays_between(idx_0, idx_1, ratio, resolution_level=resolution_level)
+        rays_o, rays_d = self.rays_generator.gen_rays_between(idx_0, idx_1, ratio, resolution_level=resolution_level)
         H, W, _ = rays_o.shape
         rays_o = rays_o.reshape(-1, 3).split(self.batch_size)
         rays_d = rays_d.reshape(-1, 3).split(self.batch_size)
