@@ -54,7 +54,7 @@ class Dataset:
         self.images_lis = sorted(glob(os.path.join(self.data_dir, self.img_dir,'*.png')))
         self.n_images = len(self.images_lis)
         self.images_np = np.stack([cv.imread(im_name) for im_name in self.images_lis]) / 256.0
-        self.masks_lis = sorted(glob(os.path.join(self.data_dir, 'mask1/*.png')))
+        self.masks_lis = sorted(glob(os.path.join(self.data_dir, 'mask/*.png')))
         self.masks_np = np.stack([cv.imread(im_name) for im_name in self.masks_lis]) / 256.0
 
         # world_mat is a projection matrix from world to image

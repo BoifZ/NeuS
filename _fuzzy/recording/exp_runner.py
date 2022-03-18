@@ -37,7 +37,7 @@ class Runner:
         self.conf['dataset.object_cameras_name'] = self.conf['dataset.object_cameras_name'].replace('TYPE', npz_postfix)
         self.conf['general.base_exp_dir'] = self.conf['general.base_exp_dir'].replace('TYPE', npz_postfix)
         # if img_dir != 'image':
-        self.base_exp_dir = self.conf['general.base_exp_dir'] + img_dir.split('image')[-1]
+        self.base_exp_dir = self.conf['general.base_exp_dir'] = img_dir.split('image')[-1]
         print(self.base_exp_dir)
         os.makedirs(self.base_exp_dir, exist_ok=True)
         self.dataset = Dataset(self.conf['dataset'])

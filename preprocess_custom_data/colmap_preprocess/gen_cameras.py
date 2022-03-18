@@ -50,7 +50,7 @@ if __name__ == '__main__':
         cam_dict['world_mat_inv_{}'.format(i)] = np.linalg.inv(world_mat)
 
 
-    pcd = trimesh.load(os.path.join(work_dir, 'sparse_points_interest.ply'))
+    pcd = trimesh.load(os.path.join(work_dir, 'sparse_points.ply'))
     vertices = pcd.vertices
     bbox_max = np.max(vertices, axis=0)
     bbox_min = np.min(vertices, axis=0)
@@ -68,7 +68,7 @@ if __name__ == '__main__':
     os.makedirs(os.path.join(out_dir, 'image'), exist_ok=True)
     os.makedirs(os.path.join(out_dir, 'mask'), exist_ok=True)
 
-    image_list = glob(os.path.join(work_dir, 'images/*.png'))
+    image_list = glob(os.path.join(work_dir, 'images/*[.jpg][.png]'))
     image_list.sort()
 
     for i, image_path in enumerate(image_list):
