@@ -125,7 +125,7 @@ class NeuSRenderer:
         color = (weights[:, :, None] * sampled_color).sum(dim=1)
         if background_rgb is not None:
             color = color + background_rgb * (1.0 - weights.sum(dim=-1, keepdim=True))
-        depth_map = torch.sum(weights * z_vals, dim=2)
+        depth_map = torch.sum(weights * z_vals, dim=-1)
 
         return {
             'color': color,

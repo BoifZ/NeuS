@@ -48,11 +48,17 @@ class Runner:
         self.learning_rate = self.conf.get_float('train.learning_rate')
         self.learning_rate_alpha = self.conf.get_float('train.learning_rate_alpha')
         self.use_white_bkgd = self.conf.get_bool('train.use_white_bkgd')
-        self.warm_up_end = self.conf.get_float('train.warm_up_end', default=0.0)
-        self.anneal_end = self.conf.get_float('train.anneal_end', default=0.0)
+        self.warm_up_end = self.conf.get_int('train.warm_up_end', default=0.0)
+        self.anneal_end = self.conf.get_int('train.anneal_end', default=0.0)
 
-        # self.start_refine_pose_iter = self.conf.get_int('train.start_refine_pose_iter')
-        # self.start_refine_pose_iter = self.conf.get_int('train.start_refine_focal_epoch')
+        self.focal_lr = self.conf.get_float('train.focal_lr')
+        self.pose_lr = self.conf.get_float('train.focal_lr')
+        self.focal_lr_gamma = self.conf.get_float('train.focal_lr_gamma')
+        self.pose_lr_gamma = self.conf.get_float('train.focal_lr_gamma')
+        self.step_size = self.conf.get_int('train.step_size')
+
+        self.start_refine_pose_iter = self.conf.get_int('train.start_refine_pose_iter')
+        self.start_refine_focal_iter = self.conf.get_int('train.start_refine_focal_iter')
 
         # Weights
         self.igr_weight = self.conf.get_float('train.igr_weight')
@@ -82,18 +88,18 @@ class Runner:
         self.optimizer = torch.optim.Adam(params_to_train, lr=self.learning_rate)
 
         # learn focal parameter
-        self.intrin_net = LearnIntrin(self.dataset.H, self.dataset.W, self.conf['model.focal'], init_focal=self.dataset.intrinsics_all).to(self.device)
+        self.intrin_net = LearnIntrin(self.dataset.H, self.dataset.W, **self.conf['model.focal'], init_focal=self.dataset.focal).to(self.device)
         # learn pose for each image
-        self.pose_param_net = LearnPose(self.dataset.n_images, self.conf['model.pose'], init_c2w=self.dataset.pose_all).to(self.device)
-        self.optimizer_focal = torch.optim.Adam(self.intrin_net.parameters(), lr=args.focal_lr)
-        self.optimizer_pose = torch.optim.Adam(self.pose_param_net.parameters(), lr=args.pose_lr)
+        self.pose_param_net = LearnPose(self.dataset.n_images, **self.conf['model.pose'], init_c2w=self.dataset.pose_all).to(self.device)
+        self.optimizer_focal = torch.optim.Adam(self.intrin_net.parameters(), lr=self.focal_lr)
+        self.optimizer_pose = torch.optim.Adam(self.pose_param_net.parameters(), lr=self.pose_lr)
 
-        self.scheduler_focal = torch.optim.lr_scheduler.MultiStepLR(self.optimizer_focal, milestones=self.warm_up_end,
+        self.scheduler_focal = torch.optim.lr_scheduler.MultiStepLR(self.optimizer_focal, milestones=(self.warm_up_end, self.end_iter, self.step_size),
                                                             gamma=self.focal_lr_gamma)
-        self.scheduler_pose = torch.optim.lr_scheduler.MultiStepLR(self.optimizer_pose, milestones=self.warm_up_end,
+        self.scheduler_pose = torch.optim.lr_scheduler.MultiStepLR(self.optimizer_pose, milestones=range(self.warm_up_end, self.end_iter, self.step_size),
                                                             gamma=self.pose_lr_gamma)
 
-        self.rays_generator = RaysGenerator(self.dataset.H, self.dataset.W, self.pose_param_net, self.intrin_net)
+        self.rays_generator = RaysGenerator(self.dataset.images_lis, self.dataset.masks_lis, self.pose_param_net, self.intrin_net)
         # Load checkpoint
         latest_model_name = None
         if is_continue:
@@ -124,7 +130,7 @@ class Runner:
         else:
             self.pose_param_net.eval()
 
-        if self.poses_iter_step >= self.start_refine_focal_epoch:
+        if self.poses_iter_step >= self.start_refine_focal_iter:
             self.intrin_net.train()
         else:
             self.intrin_net.eval()
@@ -132,12 +138,12 @@ class Runner:
         for iter_i in tqdm(range(res_step)):
             if self.poses_iter_step >= self.start_refine_pose_iter:
                 self.pose_param_net.train()
-            if self.poses_iter_step >= self.start_refine_focal_epoch:
+            if self.poses_iter_step >= self.start_refine_focal_iter:
                 self.intrin_net.train()
 
             img_idx = image_perm[self.iter_step % len(image_perm)]
             # data = self.dataset.gen_random_rays_at(image_perm[self.iter_step % len(image_perm)], self.batch_size)
-            data = self.rays_generator.gen_random_rays_at(image_perm[self.iter_step % len(image_perm)], self.batch_size)
+            data = self.rays_generator.gen_random_rays_at(img_idx, self.batch_size)
 
             rays_o, rays_d, true_rgb, mask = data[:, :3], data[:, 3: 6], data[:, 6: 9], data[:, 9: 10]
             near, far = self.dataset.near_far_from_sphere(rays_o, rays_d)

@@ -50,14 +50,19 @@ class Dataset:
         self.camera_outside_sphere = conf.get_bool('camera_outside_sphere', default=True)
         self.scale_mat_scale = conf.get_float('scale_mat_scale', default=1.1)
 
-        camera_dict = np.load(os.path.join(img_folder, self.render_cameras_name))
-        self.camera_dict = camera_dict
         self.images_lis = sorted(glob(os.path.join(img_folder, 'image/*.png')))
         self.n_images = len(self.images_lis)
-        self.images_np = np.stack([cv.imread(im_name) for im_name in self.images_lis]) / 256.0
+        # self.images_np = np.stack([cv.imread(im_name) for im_name in self.images_lis]) / 256.0
         self.masks_lis = sorted(glob(os.path.join(img_folder, 'mask/*.png')))
-        self.masks_np = np.stack([cv.imread(im_name) for im_name in self.masks_lis]) / 256.0
+        # self.masks_np = np.stack([cv.imread(im_name) for im_name in self.masks_lis]) / 256.0
         # print(self.n_images)
+        # self.images = torch.from_numpy(self.images_np.astype(np.float32)).cpu()  # [n_images, H, W, 3]
+        # self.masks  = torch.from_numpy(self.masks_np.astype(np.float32)).cpu()   # [n_images, H, W, 3]
+        self.H, self.W = cv.imread(self.images_lis[0]).shape[:2]
+        self.image_pixels = self.H * self.W
+
+        camera_dict = np.load(os.path.join(img_folder, self.render_cameras_name))
+        self.camera_dict = camera_dict
         # print(camera_dict)
 
         # world_mat is a projection matrix from world to image
@@ -66,7 +71,8 @@ class Dataset:
         self.scale_mats_np = []
         # scale_mat: used for coordinate normalization, we assume the scene to render is inside a unit sphere at origin.
         self.scale_mats_np = [camera_dict['scale_mat_%d' % idx].astype(np.float32) for idx in range(self.n_images)]
-
+        
+        # for trainning in LearnPoses& LearnIntrin
         # camera_infos = np.load(os.path.join(img_folder, 'RT_mats.npy'))
         # camera_infos = np.load(os.path.join(img_folder, 'w2c_mats.npy'))
         # self.intrinsics_all = [camera_infos['intrinsic_mat_%d' % idx].astype(np.float32) for idx in range(self.n_images)]
@@ -81,14 +87,10 @@ class Dataset:
             self.intrinsics_all.append(torch.from_numpy(intrinsics).float())
             self.pose_all.append(torch.from_numpy(pose).float())
 
-        self.images = torch.from_numpy(self.images_np.astype(np.float32)).cpu()  # [n_images, H, W, 3]
-        self.masks  = torch.from_numpy(self.masks_np.astype(np.float32)).cpu()   # [n_images, H, W, 3]
         self.intrinsics_all = torch.stack(self.intrinsics_all).to(self.device)   # [n_images, 4, 4]
         self.intrinsics_all_inv = torch.inverse(self.intrinsics_all)  # [n_images, 4, 4]
         self.focal = self.intrinsics_all[0][0, 0]
         self.pose_all = torch.stack(self.pose_all).to(self.device)  # [n_images, 4, 4]
-        self.H, self.W = self.images.shape[1], self.images.shape[2]
-        self.image_pixels = self.H * self.W
 
         object_bbox_min = np.array([-1.01, -1.01, -1.01, 1.0])
         object_bbox_max = np.array([ 1.01,  1.01,  1.01, 1.0])
