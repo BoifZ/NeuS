@@ -303,7 +303,7 @@ class Runner:
 
     def store_current_pose(self):
         self.pose_net.eval()
-        num_cams = self.pose_net.module.num_cams if isinstance(self.pose_net, torch.nn.DataParallel) else pose_net.num_cams
+        num_cams = self.pose_net.module.num_cams if isinstance(self.pose_net, torch.nn.DataParallel) else self.pose_net.num_cams
 
         c2w_list = []
         for i in range(num_cams):
