@@ -15,6 +15,7 @@ from pyhocon import ConfigFactory
 from models.dataset import Dataset
 from models.fields import RenderingNetwork, SDFNetwork, SingleVarianceNetwork, NeRF
 from models.renderer import NeuSRenderer
+from models.poses import LearnPose, LearnIntrin, RaysGenerator
 
 
 class Runner:
@@ -42,6 +43,7 @@ class Runner:
         os.makedirs(self.base_exp_dir, exist_ok=True)
         self.dataset = Dataset(self.conf['dataset'])
         self.iter_step = 0
+        self.poses_iter_step = 0
 
         # Training parameters
         self.end_iter = self.conf.get_int('train.end_iter')
@@ -54,9 +56,41 @@ class Runner:
         self.learning_rate = self.conf.get_float('train.learning_rate')
         self.learning_rate_alpha = self.conf.get_float('train.learning_rate_alpha')
         self.use_white_bkgd = self.conf.get_bool('train.use_white_bkgd')
-        self.warm_up_end = self.conf.get_float('train.warm_up_end', default=0.0)
-        self.anneal_end = self.conf.get_float('train.anneal_end', default=0.0)
+        self.warm_up_end = self.conf.get_int('train.warm_up_end', default=0.0)
+        self.anneal_end = self.conf.get_int('train.anneal_end', default=0.0)
 
+        self.learnable = self.conf.get_bool('train.focal_learnable')
+        if self.learnable:
+            self.init_focal = self.conf.get_bool('train.init_focal')
+            self.init_poses = self.conf.get_bool('train.init_poses')
+            self.focal_lr = self.conf.get_float('train.focal_lr')
+            self.pose_lr = self.conf.get_float('train.focal_lr')
+            self.focal_lr_gamma = self.conf.get_float('train.focal_lr_gamma')
+            self.pose_lr_gamma = self.conf.get_float('train.focal_lr_gamma')
+            self.step_size = self.conf.get_int('train.step_size')
+
+            self.start_refine_pose_iter = self.conf.get_int('train.start_refine_pose_iter')
+            self.start_refine_focal_iter = self.conf.get_int('train.start_refine_focal_iter')
+
+            init_focal = self.dataset.focal if self.init_focal else None
+            init_poses = self.dataset.pose_all if self.init_poses else None
+            # learn focal parameter
+            self.intrin_net = LearnIntrin(self.dataset.H, self.dataset.W, **self.conf['model.focal'], init_focal=init_focal).to(self.device)
+            # learn pose for each image
+            self.pose_param_net = LearnPose(self.dataset.n_images, **self.conf['model.pose'], init_c2w=init_poses).to(self.device)
+            self.optimizer_focal = torch.optim.Adam(self.intrin_net.parameters(), lr=self.focal_lr)
+            self.optimizer_pose = torch.optim.Adam(self.pose_param_net.parameters(), lr=self.pose_lr)
+
+            self.scheduler_focal = torch.optim.lr_scheduler.MultiStepLR(self.optimizer_focal, milestones=(self.warm_up_end, self.end_iter, self.step_size),
+                                                                gamma=self.focal_lr_gamma)
+            self.scheduler_pose = torch.optim.lr_scheduler.MultiStepLR(self.optimizer_pose, milestones=range(self.warm_up_end, self.end_iter, self.step_size),
+                                                                gamma=self.pose_lr_gamma)
+        else:
+            self.intrin_net = self.dataset.intrinsics_all
+            self.pose_param_net = self.dataset.pose_all
+  
+        self.rays_generator = RaysGenerator(self.dataset.images_lis, self.dataset.masks_lis, self.pose_param_net, self.intrin_net, learnable=self.learnable)
+  
         # Weights
         self.igr_weight = self.conf.get_float('train.igr_weight')
         self.mask_weight = self.conf.get_float('train.mask_weight')
@@ -113,9 +147,28 @@ class Runner:
         self.update_learning_rate()
         res_step = self.end_iter - self.iter_step
         image_perm = self.get_image_perm()
+        
+        if self.learnable:
+            if self.poses_iter_step >= self.start_refine_pose_iter:
+                self.pose_param_net.train()
+            else:
+                self.pose_param_net.eval()
 
+            if self.poses_iter_step >= self.start_refine_focal_iter:
+                self.intrin_net.train()
+            else:
+                self.intrin_net.eval()
+        
         for iter_i in tqdm(range(res_step)):
-            data = self.dataset.gen_random_rays_at(image_perm[self.iter_step % len(image_perm)], self.batch_size)
+            if self.learnable:
+                if self.poses_iter_step == self.start_refine_pose_iter:
+                    self.pose_param_net.train()
+                if self.poses_iter_step == self.start_refine_focal_iter:
+                    self.intrin_net.train()
+
+            img_idx = image_perm[self.iter_step % len(image_perm)]
+            # data = self.dataset.gen_random_rays_at(image_perm[self.iter_step % len(image_perm)], self.batch_size)
+            data = self.rays_generator.gen_random_rays_at(img_idx, self.batch_size)
 
             rays_o, rays_d, true_rgb, mask = data[:, :3], data[:, 3: 6], data[:, 6: 9], data[:, 9: 10]
             near, far = self.dataset.near_far_from_sphere(rays_o, rays_d)
@@ -155,8 +208,12 @@ class Runner:
                    mask_loss * self.mask_weight
 
             self.optimizer.zero_grad()
+            self.optimizer_focal.zero_grad()
+            self.optimizer_pose.zero_grad()
             loss.backward()
             self.optimizer.step()
+            self.optimizer_focal.step()
+            self.optimizer_pose.step()
 
             self.iter_step += 1
 
@@ -174,6 +231,10 @@ class Runner:
 
             if self.iter_step % self.save_freq == 0:
                 self.save_checkpoint()
+
+            # pose_history_milestone = list(range(0, 100, 5)) + list(range(100, 1000, 100)) + list(range(1000, 10000, 1000))
+            # if self.poses_iter_step in pose_history_milestone:
+            #     self.save_pnf_checkpoint()
 
             if self.iter_step % self.val_freq == 0:
                 self.validate_image()
@@ -207,6 +268,10 @@ class Runner:
         for g in self.optimizer.param_groups:
             g['lr'] = self.learning_rate * learning_factor
 
+        if self.learnable:
+            self.scheduler_focal.step()
+            self.scheduler_pose.step()
+
     def file_backup(self):
         dir_lis = self.conf['general.recording']
         os.makedirs(os.path.join(self.base_exp_dir, 'recording'), exist_ok=True)
@@ -228,6 +293,8 @@ class Runner:
         self.color_network.load_state_dict(checkpoint['color_network_fine'])
         self.optimizer.load_state_dict(checkpoint['optimizer'])
         self.iter_step = checkpoint['iter_step']
+        if self.learnable:
+            self.load_pnf_checkpoint(checkpoint_name.replace('ckpt', 'pnf'))
 
         logging.info('End')
 
@@ -243,6 +310,42 @@ class Runner:
 
         os.makedirs(os.path.join(self.base_exp_dir, 'checkpoints'), exist_ok=True)
         torch.save(checkpoint, os.path.join(self.base_exp_dir, 'checkpoints', 'ckpt_{:0>6d}.pth'.format(self.iter_step)))
+        if self.learnable:
+            self.save_pnf_checkpoint()
+
+    def load_pnf_checkpoint(self, checkpoint_name):
+        checkpoint = torch.load(os.path.join(self.base_exp_dir, 'pnf_checkpoints', checkpoint_name), map_location=self.device)
+        self.intrin_net.load_state_dict(checkpoint['intrin_net'])
+        self.pose_param_net.load_state_dict(checkpoint['pose_param_net'])
+        self.optimizer_focal.load_state_dict(checkpoint['optimizer_focal'])
+        self.optimizer_pose.load_state_dict(checkpoint['optimizer_pose'])
+        self.poses_iter_step = checkpoint['poses_iter_step']
+
+    def save_pnf_checkpoint(self):
+        pnf_checkpoint = {
+            'intrin_net': self.intrin_net.state_dict(),
+            'pose_param_net': self.pose_param_net.state_dict(),
+            'optimizer_focal': self.optimizer_focal.state_dict(),
+            'optimizer_pose': self.optimizer_pose.state_dict(),
+            'poses_iter_step': self.poses_iter_step,
+        }
+
+        os.makedirs(os.path.join(self.base_exp_dir, 'pnf_checkpoints'), exist_ok=True)
+        torch.save(pnf_checkpoint, os.path.join(self.base_exp_dir, 'pnf_checkpoints', 'pnf_{:0>6d}.pth'.format(self.iter_step)))
+
+    def store_current_pose(self):
+        self.pose_param_net.eval()
+        num_cams = self.pose_param_net.module.num_cams if isinstance(self.pose_param_net, torch.nn.DataParallel) else self.pose_param_net.num_cams
+
+        c2w_list = []
+        for i in range(num_cams):
+            c2w = self.pose_param_net(i)  # (4, 4)
+            c2w_list.append(c2w)
+            
+        c2w_list = torch.stack(c2w_list)  # (N, 4, 4)
+        c2w_list = c2w_list.detach().cpu().numpy()
+        np.save(os.path.join(self.base_exp_dir, 'cam_poses', 'pose_{:0>6d}.npy'.format(self.iter_step)), c2w_list)
+        return
 
     def validate_image(self, idx=-1, resolution_level=-1):
         if idx < 0:
@@ -252,7 +355,8 @@ class Runner:
 
         if resolution_level < 0:
             resolution_level = self.validate_resolution_level
-        rays_o, rays_d = self.dataset.gen_rays_at(idx, resolution_level=resolution_level)
+        # rays_o, rays_d = self.dataset.gen_rays_at(idx, resolution_level=resolution_level)
+        rays_o, rays_d = self.rays_generator.gen_rays_at(idx, resolution_level=resolution_level)
         H, W, _ = rays_o.shape
         rays_o = rays_o.reshape(-1, 3).split(self.batch_size)
         rays_d = rays_d.reshape(-1, 3).split(self.batch_size)
@@ -291,7 +395,8 @@ class Runner:
         normal_img = None
         if len(out_normal_fine) > 0:
             normal_img = np.concatenate(out_normal_fine, axis=0)
-            rot = np.linalg.inv(self.dataset.pose_all[idx, :3, :3].detach().cpu().numpy())
+            rot = np.linalg.inv(self.pose_param_net(idx)[:3, :3].detach().cpu().numpy())
+            # rot = np.linalg.inv(self.dataset.pose_all[idx, :3, :3].detach().cpu().numpy())
             normal_img = (np.matmul(rot[None, :, :], normal_img[:, :, None])
                           .reshape([H, W, 3, -1]) * 128 + 128).clip(0, 255)
 
@@ -315,7 +420,8 @@ class Runner:
         """
         Interpolate view between two cameras.
         """
-        rays_o, rays_d = self.dataset.gen_rays_between(idx_0, idx_1, ratio, resolution_level=resolution_level)
+        # rays_o, rays_d = self.dataset.gen_rays_between(idx_0, idx_1, ratio, resolution_level=resolution_level)
+        rays_o, rays_d = self.rays_generator.gen_rays_between(idx_0, idx_1, ratio, resolution_level=resolution_level)
         H, W, _ = rays_o.shape
         rays_o = rays_o.reshape(-1, 3).split(self.batch_size)
         rays_d = rays_d.reshape(-1, 3).split(self.batch_size)
@@ -397,7 +503,7 @@ if __name__ == '__main__':
     parser.add_argument('--mcube_threshold', type=float, default=0.0)
     parser.add_argument('-c', '--is_continue', default=False, action="store_true")
     parser.add_argument('--gpu', type=int, default=0)
-    parser.add_argument('--case', type=str, default='')
+    parser.add_argument('--case', type=str, default='', required=True)
     parser.add_argument('-d', '--img_dir', type=str, default='image')
     parser.add_argument('-psfx', '--npz_postfix', type=str, default='d')
 
