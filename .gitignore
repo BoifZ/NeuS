@@ -79,6 +79,7 @@ celerybeat-schedule
 
 # dotenv
 .env
+.vscode
 
 # virtualenv
 venv/
@@ -156,3 +157,5 @@ exp
 tmp
 
 .models/utils/gen_camera_rays.py
+.ckpts/
+ckpts/best_model_kitti.ckpt

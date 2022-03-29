@@ -1,4 +1,5 @@
 from mimetypes import init
+from re import S
 from pandas import array
 
 import torch
@@ -146,11 +147,14 @@ class LearnFocal(nn.Module):
 
 
 class RaysGenerator:
-    def __init__(self, img_lis, msk_lis, pose_net, intrin_net):
+    def __init__(self, img_lis, msk_lis, pose_net, intrin_net, learnable=False):
         super(RaysGenerator, self).__init__()
         self.pose_net = pose_net
         self.intrin_net = intrin_net
+        self.learnable = learnable
 
+        if not learnable:
+             self.intrin_inv = torch.inverse(self.intrin_net)
         print('Load data: Begin')
         self.device = torch.device('cuda')
 
@@ -159,10 +163,13 @@ class RaysGenerator:
         self.images_np = np.stack([cv.imread(im_name) for im_name in self.images_lis]) / 256.0
         self.masks_lis = msk_lis
         self.masks_np = np.stack([cv.imread(im_name) for im_name in self.masks_lis]) / 256.0
+        self.depths_np = np.squeeze(np.stack([np.load(fname.replace('image', 'depth_feats')[:-4]+'.npy')
+                                     for fname in self.images_lis]))
         # print(self.n_images)
 
         self.images = torch.from_numpy(self.images_np.astype(np.float32)).cpu()  # [n_images, H, W, 3]
         self.masks  = torch.from_numpy(self.masks_np.astype(np.float32)).cpu()   # [n_images, H, W, 3]
+        self.depth_feats = torch.from_numpy(self.depths_np.astype(np.float32)).cpu()
         self.H, self.W = self.images.shape[1], self.images.shape[2]
         self.image_pixels = self.H * self.W
 
@@ -197,8 +204,12 @@ class RaysGenerator:
         tx = torch.linspace(0, self.W - 1, self.W // l)
         ty = torch.linspace(0, self.H - 1, self.H // l)
         pixels_x, pixels_y = torch.meshgrid(tx, ty)
-        pose = self.pose_net(img_idx)
-        intrinsic_inv = torch.inverse(self.intrin_net())
+        if self.learnable:
+            pose = self.pose_net(img_idx)
+            intrinsic_inv = torch.inverse(self.intrin_net())
+        else:
+            pose = self.pose_net[img_idx]
+            intrinsic_inv = self.intrin_inv[img_idx]
         p = torch.stack([pixels_x, pixels_y, torch.ones_like(pixels_y)], dim=-1) # W, H, 3
         p = torch.matmul(intrinsic_inv[None, None, :3, :3], p[:, :, :, None]).squeeze()  # W, H, 3
         rays_v = p / torch.linalg.norm(p, ord=2, dim=-1, keepdim=True)  # W, H, 3
@@ -206,23 +217,28 @@ class RaysGenerator:
         rays_o = pose[None, None, :3, 3].expand(rays_v.shape)  # W, H, 3
         return rays_o.transpose(0, 1), rays_v.transpose(0, 1)
         
-    def gen_random_rays_at(self, idx, batch_size):
+    def gen_random_rays_at(self, img_idx, batch_size):
         """
         Generate random rays at world space from one camera.
         """
         pixels_x = torch.randint(low=0, high=self.W, size=[batch_size])
         pixels_y = torch.randint(low=0, high=self.H, size=[batch_size])
-        color = self.images[idx][(pixels_y, pixels_x)]    # batch_size, 3
-        mask = self.masks[idx][(pixels_y, pixels_x)]      # batch_size, 3
-        pose = self.pose_net(idx)
-        intrinsic_inv = torch.inverse(self.intrin_net())
+        color = self.images[img_idx][(pixels_y, pixels_x)]    # batch_size, 3
+        feats = self.depth_feats[img_idx][(pixels_y, pixels_x)]    # batch_size, 1
+        mask = self.masks[img_idx][(pixels_y, pixels_x)]      # batch_size, 3
+        if self.learnable:
+            pose = self.pose_net(img_idx)
+            intrinsic_inv = torch.inverse(self.intrin_net())
+        else:
+            pose = self.pose_net[img_idx]
+            intrinsic_inv = self.intrin_inv[img_idx]
         p = torch.stack([pixels_x, pixels_y, torch.ones_like(pixels_y)], dim=-1).float()  # batch_size, 3
         # print(intrinsic_inv[None, :3, :3].shape, p.shape)  # 1, 4, 4
         p = torch.matmul(intrinsic_inv[None, :3, :3], p[:, :, None]).squeeze()  # batch_size, 3
         rays_v = p / torch.linalg.norm(p, ord=2, dim=-1, keepdim=True)  # batch_size, 3
         rays_v = torch.matmul(pose[None, :3, :3], rays_v[:, :, None]).squeeze()  # batch_size, 3
         rays_o = pose[None, :3, 3].expand(rays_v.shape) # batch_size, 3
-        return torch.cat([rays_o.cpu(), rays_v.cpu(), color, mask[:, :1]], dim=-1).cuda()  # batch_size, 10
+        return torch.cat([rays_o.cpu(), rays_v.cpu(), color, mask[:, :1], feats], dim=-1).cuda()  # batch_size, 10
 
     def gen_rays_between(self, ratio, idx_0, idx_1, resolution_level=1):
         """
@@ -232,13 +248,18 @@ class RaysGenerator:
         tx = torch.linspace(0, self.W - 1, self.W // l)
         ty = torch.linspace(0, self.H - 1, self.H // l)
         pixels_x, pixels_y = torch.meshgrid(tx, ty)
-        intrinsic_inv = torch.inverse(self.intrin_net()).detach().cpu().numpy()
+        if self.learnable:
+            pose_0 = self.pose_net(idx_0).detach().cpu().numpy()
+            pose_1 = self.pose_net(idx_1).detach().cpu().numpy()
+            intrinsic_inv = torch.inverse(self.intrin_net()).detach().cpu().numpy()
+        else:
+            pose_0 = self.pose_net[idx_0]
+            pose_1 = self.pose_net[idx_1]
+            intrinsic_inv = self.intrin_inv[0]
         p = torch.stack([pixels_x, pixels_y, torch.ones_like(pixels_y)], dim=-1)  # W, H, 3
         p = torch.matmul(intrinsic_inv[None, None, :3, :3], p[:, :, :, None]).squeeze()  # W, H, 3
         rays_v = p / torch.linalg.norm(p, ord=2, dim=-1, keepdim=True)  # W, H, 3
 
-        pose_0 = self.pose_net(idx_0).detach().cpu().numpy()
-        pose_1 = self.pose_net(idx_1).detach().cpu().numpy()
         trans = pose_0[:3, 3] * (1.0 - ratio) + pose_1[:3, 3] * ratio
         pose_0 = np.linalg.inv(pose_0)
         pose_1 = np.linalg.inv(pose_1)

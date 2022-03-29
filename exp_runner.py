@@ -13,7 +13,7 @@ from icecream import ic
 from tqdm import tqdm
 from pyhocon import ConfigFactory
 from models.dataset import Dataset
-from models.fields import RenderingNetwork, SDFNetwork, SingleVarianceNetwork, NeRF
+from models.fields import RenderingNetwork, SDFNetwork, SingleVarianceNetwork, NeRFx
 from models.renderer import NeuSRenderer
 from models.poses import LearnPose, LearnIntrin, RaysGenerator
 
@@ -51,15 +51,34 @@ class Runner:
         self.warm_up_end = self.conf.get_int('train.warm_up_end', default=0.0)
         self.anneal_end = self.conf.get_int('train.anneal_end', default=0.0)
 
-        self.focal_lr = self.conf.get_float('train.focal_lr')
-        self.pose_lr = self.conf.get_float('train.focal_lr')
-        self.focal_lr_gamma = self.conf.get_float('train.focal_lr_gamma')
-        self.pose_lr_gamma = self.conf.get_float('train.focal_lr_gamma')
-        self.step_size = self.conf.get_int('train.step_size')
+        self.learnable = self.conf.get_bool('train.focal_learnable')
+        if self.learnable:
+            self.focal_lr = self.conf.get_float('train.focal_lr')
+            self.pose_lr = self.conf.get_float('train.pose_lr')
+            self.focal_lr_gamma = self.conf.get_float('train.focal_lr_gamma')
+            self.pose_lr_gamma = self.conf.get_float('train.pose_lr_gamma')
+            self.step_size = self.conf.get_int('train.step_size')
 
-        self.start_refine_pose_iter = self.conf.get_int('train.start_refine_pose_iter')
-        self.start_refine_focal_iter = self.conf.get_int('train.start_refine_focal_iter')
+            self.start_refine_pose_iter = self.conf.get_int('train.start_refine_pose_iter')
+            self.start_refine_focal_iter = self.conf.get_int('train.start_refine_focal_iter')
 
+            # learn focal parameter
+            self.intrin_net = LearnIntrin(self.dataset.H, self.dataset.W, **self.conf['model.focal'], init_focal=self.dataset.focal).to(self.device)
+            # learn pose for each image
+            self.pose_param_net = LearnPose(self.dataset.n_images, **self.conf['model.pose'], init_c2w=self.dataset.pose_all).to(self.device)
+            self.optimizer_focal = torch.optim.Adam(self.intrin_net.parameters(), lr=self.focal_lr)
+            self.optimizer_pose = torch.optim.Adam(self.pose_param_net.parameters(), lr=self.pose_lr)
+
+            self.scheduler_focal = torch.optim.lr_scheduler.MultiStepLR(self.optimizer_focal, milestones=(self.warm_up_end, self.end_iter, self.step_size),
+                                                                gamma=self.focal_lr_gamma)
+            self.scheduler_pose = torch.optim.lr_scheduler.MultiStepLR(self.optimizer_pose, milestones=range(self.warm_up_end, self.end_iter, self.step_size),
+                                                                gamma=self.pose_lr_gamma)
+        else:
+            self.intrin_net = self.dataset.intrinsics_all
+            self.pose_param_net = self.dataset.pose_all
+  
+        self.rays_generator = RaysGenerator(self.dataset.images_lis, self.dataset.masks_lis, self.pose_param_net, self.intrin_net, learnable=self.learnable)
+          
         # Weights
         self.igr_weight = self.conf.get_float('train.igr_weight')
         self.mask_weight = self.conf.get_float('train.mask_weight')
@@ -87,19 +106,6 @@ class Runner:
 
         self.optimizer = torch.optim.Adam(params_to_train, lr=self.learning_rate)
 
-        # learn focal parameter
-        self.intrin_net = LearnIntrin(self.dataset.H, self.dataset.W, **self.conf['model.focal'], init_focal=self.dataset.focal).to(self.device)
-        # learn pose for each image
-        self.pose_param_net = LearnPose(self.dataset.n_images, **self.conf['model.pose'], init_c2w=self.dataset.pose_all).to(self.device)
-        self.optimizer_focal = torch.optim.Adam(self.intrin_net.parameters(), lr=self.focal_lr)
-        self.optimizer_pose = torch.optim.Adam(self.pose_param_net.parameters(), lr=self.pose_lr)
-
-        self.scheduler_focal = torch.optim.lr_scheduler.MultiStepLR(self.optimizer_focal, milestones=(self.warm_up_end, self.end_iter, self.step_size),
-                                                            gamma=self.focal_lr_gamma)
-        self.scheduler_pose = torch.optim.lr_scheduler.MultiStepLR(self.optimizer_pose, milestones=range(self.warm_up_end, self.end_iter, self.step_size),
-                                                            gamma=self.pose_lr_gamma)
-
-        self.rays_generator = RaysGenerator(self.dataset.images_lis, self.dataset.masks_lis, self.pose_param_net, self.intrin_net)
         # Load checkpoint
         latest_model_name = None
         if is_continue:
@@ -124,28 +130,30 @@ class Runner:
         self.update_learning_rate()
         res_step = self.end_iter - self.iter_step
         image_perm = self.get_image_perm()
-
-        if self.poses_iter_step >= self.start_refine_pose_iter:
-            self.pose_param_net.train()
-        else:
-            self.pose_param_net.eval()
-
-        if self.poses_iter_step >= self.start_refine_focal_iter:
-            self.intrin_net.train()
-        else:
-            self.intrin_net.eval()
         
-        for iter_i in tqdm(range(res_step)):
+        if self.learnable:
             if self.poses_iter_step >= self.start_refine_pose_iter:
                 self.pose_param_net.train()
+            else:
+                self.pose_param_net.eval()
+
             if self.poses_iter_step >= self.start_refine_focal_iter:
                 self.intrin_net.train()
+            else:
+                self.intrin_net.eval()
+        
+        for iter_i in tqdm(range(res_step)):
+            if self.learnable:
+                if self.poses_iter_step >= self.start_refine_pose_iter:
+                    self.pose_param_net.train()
+                if self.poses_iter_step >= self.start_refine_focal_iter:
+                    self.intrin_net.train()
 
             img_idx = image_perm[self.iter_step % len(image_perm)]
             # data = self.dataset.gen_random_rays_at(image_perm[self.iter_step % len(image_perm)], self.batch_size)
             data = self.rays_generator.gen_random_rays_at(img_idx, self.batch_size)
 
-            rays_o, rays_d, true_rgb, mask = data[:, :3], data[:, 3: 6], data[:, 6: 9], data[:, 9: 10]
+            rays_o, rays_d, true_rgb, mask, gt_feats = data[:, :3], data[:, 3: 6], data[:, 6: 9], data[:, 9: 10], data[:, 10:]
             near, far = self.dataset.near_far_from_sphere(rays_o, rays_d)
 
             background_rgb = None
@@ -162,6 +170,7 @@ class Runner:
                                               background_rgb=background_rgb,
                                               cos_anneal_ratio=self.get_cos_anneal_ratio())
 
+            depth_feats = render_out['render_feats']
             color_fine = render_out['color_fine']
             s_val = render_out['s_val']
             cdf_fine = render_out['cdf_fine']
@@ -170,6 +179,7 @@ class Runner:
             weight_sum = render_out['weight_sum']
 
             # Loss
+            depth_feat_error = (depth_feats - gt_feats) * mask
             color_error = (color_fine - true_rgb) * mask
             color_fine_loss = F.l1_loss(color_error, torch.zeros_like(color_error), reduction='sum') / mask_sum
             psnr = 20.0 * torch.log10(1.0 / (((color_fine - true_rgb)**2 * mask).sum() / (mask_sum * 3.0)).sqrt())
@@ -187,7 +197,7 @@ class Runner:
             self.optimizer.step()
 
             self.iter_step += 1
-            # self.poses_iter_step += 1
+            self.poses_iter_step += 1
 
             self.writer.add_scalar('Loss/loss', loss, self.iter_step)
             self.writer.add_scalar('Loss/color_loss', color_fine_loss, self.iter_step)
@@ -202,7 +212,6 @@ class Runner:
 
             if self.iter_step % self.save_freq == 0:
                 self.save_checkpoint()
-                self.save_pnf_checkpoint()
 
             # pose_history_milestone = list(range(0, 100, 5)) + list(range(100, 1000, 100)) + list(range(1000, 10000, 1000))
             # if self.poses_iter_step in pose_history_milestone:
@@ -212,7 +221,10 @@ class Runner:
                 self.validate_image()
 
             if self.iter_step % self.val_mesh_freq == 0:
-                self.validate_mesh()
+                res = 128
+                if self.iter_step % 10000==0: 
+                    res = 256
+                self.validate_mesh(resolution=res)
 
             self.update_learning_rate()
 
@@ -239,8 +251,9 @@ class Runner:
         for g in self.optimizer.param_groups:
             g['lr'] = self.learning_rate * learning_factor
 
-        self.scheduler_focal.step()
-        self.scheduler_pose.step()
+        if self.learnable:
+            self.scheduler_focal.step()
+            self.scheduler_pose.step()
 
     def file_backup(self):
         dir_lis = self.conf['general.recording']
@@ -263,7 +276,8 @@ class Runner:
         self.color_network.load_state_dict(checkpoint['color_network_fine'])
         self.optimizer.load_state_dict(checkpoint['optimizer'])
         self.iter_step = checkpoint['iter_step']
-        self.load_pnf_checkpoint(checkpoint_name.replace('ckpt', 'pnf'))
+        if self.learnable:
+            self.load_pnf_checkpoint(checkpoint_name.replace('ckpt', 'pnf'))
 
         logging.info('End')
 
@@ -279,6 +293,8 @@ class Runner:
 
         os.makedirs(os.path.join(self.base_exp_dir, 'checkpoints'), exist_ok=True)
         torch.save(checkpoint, os.path.join(self.base_exp_dir, 'checkpoints', 'ckpt_{:0>6d}.pth'.format(self.iter_step)))
+        if self.learnable:
+            self.save_pnf_checkpoint()
 
     def load_pnf_checkpoint(self, checkpoint_name):
         checkpoint = torch.load(os.path.join(self.base_exp_dir, 'pnf_checkpoints', checkpoint_name), map_location=self.device)
@@ -286,15 +302,14 @@ class Runner:
         self.pose_param_net.load_state_dict(checkpoint['pose_param_net'])
         self.optimizer_focal.load_state_dict(checkpoint['optimizer_focal'])
         self.optimizer_pose.load_state_dict(checkpoint['optimizer_pose'])
-        self.optimizer.load_state_dict(checkpoint['optimizer'])
         self.poses_iter_step = checkpoint['poses_iter_step']
 
     def save_pnf_checkpoint(self):
         pnf_checkpoint = {
-            'intrin_net': self.intrin_net,
-            'pose_param_net': self.pose_param_net,
-            'optimizer_focal': self.optimizer_focal,
-            'optimizer_pose': self.optimizer_pose,
+            'intrin_net': self.intrin_net.state_dict(),
+            'pose_param_net': self.pose_param_net.state_dict(),
+            'optimizer_focal': self.optimizer_focal.state_dict(),
+            'optimizer_pose': self.optimizer_pose.state_dict(),
             'poses_iter_step': self.poses_iter_step,
         }
 
@@ -413,7 +428,7 @@ class Runner:
         img_fine = (np.concatenate(out_rgb_fine, axis=0).reshape([H, W, 3]) * 256).clip(0, 255).astype(np.uint8)
         return img_fine
 
-    def validate_mesh(self, world_space=False, resolution=64, threshold=0.0):
+    def validate_mesh(self, world_space=False, resolution=256, threshold=0.0):
         bound_min = torch.tensor(self.dataset.object_bbox_min, dtype=torch.float32)
         bound_max = torch.tensor(self.dataset.object_bbox_max, dtype=torch.float32)
 
