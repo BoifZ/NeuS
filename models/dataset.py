@@ -50,7 +50,8 @@ class Dataset:
         self.scale_mat_scale = conf.get_float('scale_mat_scale', default=1.1)
 
         self.images_lis = sorted(glob(os.path.join(self.data_dir, self.img_dir,'*.png')))
-        self.n_images = len(self.images_lis)
+        self.n_images = len(self.images_lis)//3
+        # print(self.n_images)
         # self.images_np = np.stack([cv.imread(im_name) for im_name in self.images_lis]) / 256.0
         self.masks_lis = sorted(glob(os.path.join(self.data_dir, 'mask/*.png')))
         # self.masks_np = np.stack([cv.imread(im_name) for im_name in self.masks_lis]) / 256.0
