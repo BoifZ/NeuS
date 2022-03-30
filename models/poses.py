@@ -147,8 +147,10 @@ class LearnFocal(nn.Module):
 
 
 class RaysGenerator:
-    def __init__(self, img_lis, msk_lis, pose_net, intrin_net, learnable=False):
+    def __init__(self, img_lis, msk_lis, depth_lis, pose_net, intrin_net,
+                 learnable=False, image_size=(896, 1184)):
         super(RaysGenerator, self).__init__()
+        self.image_size = image_size
         self.pose_net = pose_net
         self.intrin_net = intrin_net
         self.learnable = learnable
@@ -157,19 +159,30 @@ class RaysGenerator:
              self.intrin_inv = torch.inverse(self.intrin_net)
         print('Load data: Begin')
         self.device = torch.device('cuda')
-
+        
         self.images_lis = img_lis
         self.n_images = len(self.images_lis)
-        self.images_np = np.stack([cv.imread(im_name) for im_name in self.images_lis]) / 256.0
+        self.images_np = np.stack([self.cropping(cv.imread(im_name), crop_size=self.image_size) for im_name in self.images_lis]) / 256.0
         self.masks_lis = msk_lis
-        self.masks_np = np.stack([cv.imread(im_name) for im_name in self.masks_lis]) / 256.0
-        self.depths_np = np.squeeze(np.stack([np.load(fname.replace('image', 'depth_feats')[:-4]+'.npy')
-                                     for fname in self.images_lis]))
+        self.masks_np = np.stack([self.cropping(cv.imread(im_name), crop_size=self.image_size) for im_name in self.masks_lis]) / 256.0
+        self.depth_lis = depth_lis
+        self.d_scale = 1
+        self.up_feats = nn.Upsample(size=image_size, mode='bilinear')
+        print(depth_lis[0])
+        self.depths_np = np.stack([np.squeeze(self.cropping(np.load(fname), crop_size=self.image_size, scale=self.d_scale)) for fname in self.depth_lis]) / 256.0
         # print(self.n_images)
 
         self.images = torch.from_numpy(self.images_np.astype(np.float32)).cpu()  # [n_images, H, W, 3]
         self.masks  = torch.from_numpy(self.masks_np.astype(np.float32)).cpu()   # [n_images, H, W, 3]
         self.depth_feats = torch.from_numpy(self.depths_np.astype(np.float32)).cpu()
+        print(self.depth_feats.shape)
+        if self.depth_feats.dim()==3:
+            self.depth_feats = self.depth_feats.unsqueeze(1)
+        self.depth_feats = self.up_feats(self.depth_feats)
+        print(self.depth_feats.shape)
+        self.depth_feats = self.depth_feats.permute(0,2,3,1)
+        assert self.images.shape[1:3]==self.image_size, 'self.images in {} doesnot match self.image_size in {}'.format(self.images.shape, self.image_size)
+        assert self.images.shape[:-1]==self.depth_feats.shape[:-1], 'self.images in {} doesnot match self.depth_feats in {}'.format(self.images.shape[:-1], self.depth_feats.shape[:-1])
         self.H, self.W = self.images.shape[1], self.images.shape[2]
         self.image_pixels = self.H * self.W
 
@@ -195,6 +208,20 @@ class RaysGenerator:
         # self.object_bbox_min = object_bbox_min[:3, 0]
         # self.object_bbox_max = object_bbox_max[:3, 0]
         print('Load data: End')
+
+    # kb cropping
+    def cropping(self, img, crop_size=(352, 1216), scale=1):
+        h_im, w_im = img.shape[:2]
+        
+        margin_top = max(0, int(h_im - crop_size[0]//scale))
+        margin_left = max(0, int((w_im - crop_size[1]//scale)/ 2))
+        margin_bottom = min(h_im, margin_top + crop_size[0]//scale)
+        margin_right = min(w_im, margin_left + crop_size[1]//scale)
+
+        img = img[margin_top: margin_bottom,
+                  margin_left: margin_right]
+        return img
+
 
     def gen_rays_at(self, img_idx, resolution_level=1):
         """

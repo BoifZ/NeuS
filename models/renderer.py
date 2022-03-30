@@ -80,6 +80,7 @@ class NeuSRenderer:
                  sdf_network,
                  deviation_network,
                  color_network,
+                 depth_network,
                  n_samples,
                  n_importance,
                  n_outside,
@@ -89,6 +90,7 @@ class NeuSRenderer:
         self.sdf_network = sdf_network
         self.deviation_network = deviation_network
         self.color_network = color_network
+        self.depth_network = depth_network
         self.n_samples = n_samples
         self.n_importance = n_importance
         self.n_outside = n_outside
@@ -117,7 +119,8 @@ class NeuSRenderer:
         pts = pts.reshape(-1, 3 + int(self.n_outside > 0))
         dirs = dirs.reshape(-1, 3)
 
-        density, sampled_color = nerf(pts, dirs)
+        # add depth_feats
+        density, sampled_color, sampled_feat = nerf(pts, dirs)
         alpha = 1.0 - torch.exp(-F.softplus(density.reshape(batch_size, n_samples)) * dists)
         alpha = alpha.reshape(batch_size, n_samples)
         weights = alpha * torch.cumprod(torch.cat([torch.ones([batch_size, 1]), 1. - alpha + 1e-7], -1), -1)[:, :-1]
@@ -127,8 +130,12 @@ class NeuSRenderer:
             color = color + background_rgb * (1.0 - weights.sum(dim=-1, keepdim=True))
         depth_map = torch.sum(weights * z_vals, dim=-1)
 
+        # add depth_feats
+        sampled_feat = sampled_feat.reshape(batch_size, n_samples, -1)
         return {
             'color': color,
+            # add depth_feats
+            'sampled_feat': sampled_feat,
             'sampled_color': sampled_color,
             'alpha': alpha,
             'weights': weights,
@@ -205,7 +212,10 @@ class NeuSRenderer:
                     sdf_network,
                     deviation_network,
                     color_network,
+                    # add depth_feats
+                    depth_network=None,
                     background_alpha=None,
+                    background_sampled_feat=None,
                     background_sampled_color=None,
                     background_rgb=None,
                     cos_anneal_ratio=0.0):
@@ -229,6 +239,8 @@ class NeuSRenderer:
 
         gradients = sdf_network.gradient(pts).squeeze()
         sampled_color = color_network(pts, gradients, dirs, feature_vector).reshape(batch_size, n_samples, 3)
+        # add depth_feats
+        sampled_feat = depth_network(pts, gradients, dirs, feature_vector).reshape(batch_size, n_samples, -1)
 
         # alpha = 1.0 - torch.exp(-F.softplus(density.reshape(batch_size, n_samples)) * dists)
         # alpha = alpha.reshape(batch_size, n_samples)
@@ -272,11 +284,16 @@ class NeuSRenderer:
             sampled_color = sampled_color * inside_sphere[:, :, None] +\
                             background_sampled_color[:, :n_samples] * (1.0 - inside_sphere)[:, :, None]
             sampled_color = torch.cat([sampled_color, background_sampled_color[:, n_samples:]], dim=1)
+            # add depth_feats
+            sampled_feat = sampled_feat * inside_sphere[:, :, None] +\
+                            background_sampled_feat[:, :n_samples] * (1.0 - inside_sphere)[:, :, None]
+            sampled_feat = torch.cat([sampled_feat, background_sampled_feat[:, n_samples:]], dim=1)
 
         weights = alpha * torch.cumprod(torch.cat([torch.ones([batch_size, 1]), 1. - alpha + 1e-7], -1), -1)[:, :-1]
         weights_sum = weights.sum(dim=-1, keepdim=True)
 
         color = (sampled_color * weights[:, :, None]).sum(dim=1)
+        d_feats = (sampled_feat * weights[:, :, None]).sum(dim=1)
         if background_rgb is not None:    # Fixed background, usually black
             color = color + background_rgb * (1.0 - weights_sum)
 
@@ -286,6 +303,8 @@ class NeuSRenderer:
         gradient_error = (relax_inside_sphere * gradient_error).sum() / (relax_inside_sphere.sum() + 1e-5)
 
         return {
+            # add depth_feats
+            'd_feats': d_feats,
             'color': color,
             'sdf': sdf,
             'dists': dists,
@@ -329,6 +348,7 @@ class NeuSRenderer:
 
         background_alpha = None
         background_sampled_color = None
+        background_sampled_feat = None
 
         # Up sample
         if self.n_importance > 0:
@@ -358,6 +378,7 @@ class NeuSRenderer:
             z_vals_feed, _ = torch.sort(z_vals_feed, dim=-1)
             ret_outside = self.render_core_outside(rays_o, rays_d, z_vals_feed, sample_dist, self.nerf)
 
+            background_sampled_feat = ret_outside['sampled_feat']
             background_sampled_color = ret_outside['sampled_color']
             background_alpha = ret_outside['alpha']
 
@@ -369,11 +390,14 @@ class NeuSRenderer:
                                     self.sdf_network,
                                     self.deviation_network,
                                     self.color_network,
+                                    self.depth_network,
                                     background_rgb=background_rgb,
                                     background_alpha=background_alpha,
+                                    background_sampled_feat=background_sampled_feat,
                                     background_sampled_color=background_sampled_color,
                                     cos_anneal_ratio=cos_anneal_ratio)
 
+        render_feats = ret_fine['d_feats']
         color_fine = ret_fine['color']
         weights = ret_fine['weights']
         weights_sum = weights.sum(dim=-1, keepdim=True)
@@ -381,6 +405,8 @@ class NeuSRenderer:
         s_val = ret_fine['s_val'].reshape(batch_size, n_samples).mean(dim=-1, keepdim=True)
 
         return {
+            # add depth_feats
+            'render_feats': render_feats,
             'color_fine': color_fine,
             's_val': s_val,
             'cdf_fine': ret_fine['cdf'],

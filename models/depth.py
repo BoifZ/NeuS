@@ -4,7 +4,21 @@ import torch
 import torch.nn as nn
 
 from mmcv.runner import load_checkpoint
-from depth_mit import mit_b4
+from models.depth_mit import mit_b4
+
+
+class SiLogLoss(nn.Module):
+    def __init__(self, lambd=0.5):
+        super().__init__()
+        self.lambd = lambd
+
+    def forward(self, pred, target):
+        valid_mask = (target > 0).detach()
+        diff_log = torch.log(target[valid_mask]) - torch.log(pred[valid_mask])
+        loss = torch.sqrt(torch.pow(diff_log, 2).mean() -
+                          self.lambd * torch.pow(diff_log.mean(), 2))
+
+        return loss
 
 
 class GLPDepth(nn.Module):
@@ -176,19 +190,20 @@ if __name__ == '__main__':
         
         im_name = os.path.basename(im_name)
         for idx, feat in enumerate(enc_feats):
-            feat_numpy = feat.squeeze().cpu().numpy()
+            feat_numpy = torch.sigmoid(feat).squeeze().cpu().numpy()
             if not os.path.exists(os.path.join(result_path_feat, str(idx))):
                 os.makedirs(os.path.join(result_path_feat, str(idx)), exist_ok=True)
             save_path = os.path.join(result_path_feat, str(idx), im_name[:-4]+'.npy')
             np.save(save_path, feat_numpy)
 
         pred_d = pred['pred_d']
-        pred_d_numpy = pred_d.squeeze().cpu().numpy() *10.0
+        pred_d_numpy = pred_d.squeeze().cpu().numpy()
+        depth_save_path = os.path.join(result_path_feat, im_name[:-4]+'.npy')
+        np.save(depth_save_path, pred_d_numpy)
+
         pred_d_numpy = (pred_d_numpy / pred_d_numpy.max()) * 255
         pred_d_numpy = pred_d_numpy.astype(np.uint8)
         pred_d_color = cv.applyColorMap(pred_d_numpy, cv.COLORMAP_RAINBOW)
         im_save_path = os.path.join(result_path_img, im_name)
         cv.imwrite(im_save_path, pred_d_color)
 
-        depth_save_path = os.path.join(result_path_feat, im_name[:-4]+'.npy')
-        np.save(depth_save_path, pred_d_numpy)

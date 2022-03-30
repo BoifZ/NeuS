@@ -156,6 +156,5 @@ public_data
 exp
 tmp
 
-.models/utils/gen_camera_rays.py
-.ckpts/
-ckpts/best_model_kitti.ckpt
+models/utils/gen_camera_rays.py
+ckpts/

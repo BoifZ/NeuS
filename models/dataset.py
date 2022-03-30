@@ -35,7 +35,7 @@ def load_K_Rt_from_P(filename, P=None):
 
 
 class Dataset:
-    def __init__(self, conf):
+    def __init__(self, conf, image_size=(896, 1184)):
         super(Dataset, self).__init__()
         print('Load data: Begin')
         self.device = torch.device('cuda')
@@ -50,6 +50,7 @@ class Dataset:
         self.camera_outside_sphere = conf.get_bool('camera_outside_sphere', default=True)
         self.scale_mat_scale = conf.get_float('scale_mat_scale', default=1.1)
 
+        self.image_size = image_size
         self.images_lis = sorted(glob(os.path.join(img_folder, 'image/*.png')))
         self.n_images = len(self.images_lis)
         # self.images_np = np.stack([cv.imread(im_name) for im_name in self.images_lis]) / 256.0
@@ -58,6 +59,7 @@ class Dataset:
         # print(self.n_images)
         # self.images = torch.from_numpy(self.images_np.astype(np.float32)).cpu()  # [n_images, H, W, 3]
         # self.masks  = torch.from_numpy(self.masks_np.astype(np.float32)).cpu()   # [n_images, H, W, 3]
+        self.depth_lis = sorted(glob(os.path.join(img_folder, 'depth_feats/*.npy')))
         self.H, self.W = cv.imread(self.images_lis[0]).shape[:2]
         self.image_pixels = self.H * self.W
 

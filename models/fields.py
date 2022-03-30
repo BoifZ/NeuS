@@ -179,6 +179,8 @@ class NeRF(nn.Module):
                  W=256,
                  d_in=3,
                  d_in_view=3,
+                 gen_depth_feats=True,
+                 dpt_dim=1,
                  multires=0,
                  multires_view=0,
                  output_ch=4,
@@ -193,6 +195,8 @@ class NeRF(nn.Module):
         self.input_ch_view = 3
         self.embed_fn = None
         self.embed_fn_view = None
+        self.gen_depth_feats = gen_depth_feats
+        self.dpt_dim = dpt_dim
 
         if multires > 0:
             embed_fn, input_ch = get_embedder(multires, input_dims=d_in)
@@ -223,6 +227,8 @@ class NeRF(nn.Module):
             self.feature_linear = nn.Linear(W, W)
             self.alpha_linear = nn.Linear(W, 1)
             self.rgb_linear = nn.Linear(W // 2, 3)
+            if self.gen_depth_feats:
+                self.dpt_linear = nn.Linear(W // 2, dpt_dim)
         else:
             self.output_linear = nn.Linear(W, output_ch)
 
@@ -249,7 +255,13 @@ class NeRF(nn.Module):
                 h = F.relu(h)
 
             rgb = self.rgb_linear(h)
-            return alpha, rgb
+            if self.gen_depth_feats:
+                # add depth_feats
+                depth_feat = self.dpt_linear(h)  # channels=128
+                # depth_feat = torch.sigmoid(depth_feat)
+            else:
+                depth_feat = None
+            return alpha, rgb, depth_feat
         else:
             assert False
 

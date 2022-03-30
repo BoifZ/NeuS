@@ -13,9 +13,10 @@ from icecream import ic
 from tqdm import tqdm
 from pyhocon import ConfigFactory
 from models.dataset import Dataset
-from models.fields import RenderingNetwork, SDFNetwork, SingleVarianceNetwork, NeRFx
+from models.fields import RenderingNetwork, SDFNetwork, SingleVarianceNetwork, NeRF
 from models.renderer import NeuSRenderer
 from models.poses import LearnPose, LearnIntrin, RaysGenerator
+from models.depth import SiLogLoss
 
 
 class Runner:
@@ -51,6 +52,7 @@ class Runner:
         self.warm_up_end = self.conf.get_int('train.warm_up_end', default=0.0)
         self.anneal_end = self.conf.get_int('train.anneal_end', default=0.0)
 
+        self.extract_depth = self.conf.get_bool('train.extract_depth')
         self.learnable = self.conf.get_bool('train.focal_learnable')
         if self.learnable:
             self.focal_lr = self.conf.get_float('train.focal_lr')
@@ -77,8 +79,7 @@ class Runner:
             self.intrin_net = self.dataset.intrinsics_all
             self.pose_param_net = self.dataset.pose_all
   
-        self.rays_generator = RaysGenerator(self.dataset.images_lis, self.dataset.masks_lis, self.pose_param_net, self.intrin_net, learnable=self.learnable)
-          
+        self.rays_generator = RaysGenerator(self.dataset.images_lis, self.dataset.masks_lis, self.dataset.depth_lis, self.pose_param_net, self.intrin_net, learnable=self.learnable)
         # Weights
         self.igr_weight = self.conf.get_float('train.igr_weight')
         self.mask_weight = self.conf.get_float('train.mask_weight')
@@ -97,11 +98,19 @@ class Runner:
         params_to_train += list(self.sdf_network.parameters())
         params_to_train += list(self.deviation_network.parameters())
         params_to_train += list(self.color_network.parameters())
+        if self.extract_depth:
+            # add depth_feats+
+            self.depth_network = RenderingNetwork(**self.conf['model.depth_extract_network']).to(self.device)
+            self.d_loss = SiLogLoss()
+            params_to_train += list(self.depth_network.parameters())
+        else:
+            self.depth_network = None
 
         self.renderer = NeuSRenderer(self.nerf_outside,
                                      self.sdf_network,
                                      self.deviation_network,
                                      self.color_network,
+                                     self.depth_network,
                                      **self.conf['model.neus_renderer'])
 
         self.optimizer = torch.optim.Adam(params_to_train, lr=self.learning_rate)
@@ -179,26 +188,43 @@ class Runner:
             weight_sum = render_out['weight_sum']
 
             # Loss
-            depth_feat_error = (depth_feats - gt_feats) * mask
             color_error = (color_fine - true_rgb) * mask
             color_fine_loss = F.l1_loss(color_error, torch.zeros_like(color_error), reduction='sum') / mask_sum
             psnr = 20.0 * torch.log10(1.0 / (((color_fine - true_rgb)**2 * mask).sum() / (mask_sum * 3.0)).sqrt())
 
             eikonal_loss = gradient_error
-
             mask_loss = F.binary_cross_entropy(weight_sum.clip(1e-3, 1.0 - 1e-3), mask)
 
             loss = color_fine_loss +\
                    eikonal_loss * self.igr_weight +\
                    mask_loss * self.mask_weight
+                
+            if self.extract_depth:
+                # print(gt_feats.shape)
+                # depth_loss = self.d_loss(torch.sigmoid(depth_feats), gt_feats)
+                # depth_fine_loss = F.l1_loss(depth_loss, torch.zeros_like(depth_loss), reduction='sum') / mask_sum
+                # loss += depth_loss
+                depth_feat_error = (depth_feats - gt_feats) * mask
+                depth_fine_loss = F.l1_loss(depth_feat_error, torch.zeros_like(depth_feat_error), reduction='sum') / mask_sum
+                psnr_dfeat = 20.0 * torch.log10(1.0 / (((depth_feats - gt_feats)**2 * mask).sum() / (mask_sum * 3.0)).sqrt())
+                loss += depth_fine_loss
 
+                # self.writer.add_scalar('Loss/depth_loss', depth_loss, self.iter_step)
+                self.writer.add_scalar('Loss/depth_loss', depth_fine_loss, self.iter_step)
+                self.writer.add_scalar('Statistics/psnr_dfeat', psnr_dfeat, self.iter_step)
+
+            # print(depth_loss)
+            # print(loss)
             self.optimizer.zero_grad()
+            self.optimizer_focal.zero_grad()
+            self.optimizer_pose.zero_grad()
             loss.backward()
             self.optimizer.step()
+            self.optimizer_focal.step()
+            self.optimizer_pose.step()
 
             self.iter_step += 1
             self.poses_iter_step += 1
-
             self.writer.add_scalar('Loss/loss', loss, self.iter_step)
             self.writer.add_scalar('Loss/color_loss', color_fine_loss, self.iter_step)
             self.writer.add_scalar('Loss/eikonal_loss', eikonal_loss, self.iter_step)
@@ -287,6 +313,7 @@ class Runner:
             'sdf_network_fine': self.sdf_network.state_dict(),
             'variance_network_fine': self.deviation_network.state_dict(),
             'color_network_fine': self.color_network.state_dict(),
+            'depth_network_fine': self.depth_network.state_dict(),
             'optimizer': self.optimizer.state_dict(),
             'iter_step': self.iter_step,
         }
