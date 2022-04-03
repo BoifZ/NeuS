@@ -100,6 +100,7 @@ class Runner:
         params_to_train += list(self.color_network.parameters())
         if self.extract_depth:
             # add depth_feats+
+            self.depth_weight = self.conf.get_float('train.depth_weight')
             self.depth_network = RenderingNetwork(**self.conf['model.depth_extract_network']).to(self.device)
             self.d_loss = SiLogLoss()
             params_to_train += list(self.depth_network.parameters())
@@ -204,12 +205,12 @@ class Runner:
                 # depth_loss = self.d_loss(torch.sigmoid(depth_feats), gt_feats)
                 # depth_fine_loss = F.l1_loss(depth_loss, torch.zeros_like(depth_loss), reduction='sum') / mask_sum
                 # loss += depth_loss
+                # self.writer.add_scalar('Loss/depth_loss', depth_loss, self.iter_step)
+
                 depth_feat_error = (depth_feats - gt_feats) * mask
                 depth_fine_loss = F.l1_loss(depth_feat_error, torch.zeros_like(depth_feat_error), reduction='sum') / mask_sum
                 psnr_dfeat = 20.0 * torch.log10(1.0 / (((depth_feats - gt_feats)**2 * mask).sum() / (mask_sum * 3.0)).sqrt())
-                loss += depth_fine_loss
-
-                # self.writer.add_scalar('Loss/depth_loss', depth_loss, self.iter_step)
+                loss += depth_fine_loss * self.depth_weight
                 self.writer.add_scalar('Loss/depth_loss', depth_fine_loss, self.iter_step)
                 self.writer.add_scalar('Statistics/psnr_dfeat', psnr_dfeat, self.iter_step)
 
