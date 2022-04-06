@@ -68,8 +68,8 @@ class Runner:
             self.intrin_net = LearnIntrin(self.dataset.H, self.dataset.W, **self.conf['model.focal'], init_focal=self.dataset.focal).to(self.device)
             # learn pose for each image
             self.pose_param_net = LearnPose(self.dataset.n_images, **self.conf['model.pose'], init_c2w=self.dataset.pose_all).to(self.device)
-            self.optimizer_focal = torch.optim.Adam(self.intrin_net.parameters(), lr=self.focal_lr)
-            self.optimizer_pose = torch.optim.Adam(self.pose_param_net.parameters(), lr=self.pose_lr)
+            # self.optimizer_focal = torch.optim.Adam(self.intrin_net.parameters(), lr=self.focal_lr)
+            # self.optimizer_pose = torch.optim.Adam(self.pose_param_net.parameters(), lr=self.pose_lr)
 
             self.scheduler_focal = torch.optim.lr_scheduler.MultiStepLR(self.optimizer_focal, milestones=(self.warm_up_end, self.end_iter, self.step_size),
                                                                 gamma=self.focal_lr_gamma)
@@ -217,12 +217,12 @@ class Runner:
             # print(depth_loss)
             # print(loss)
             self.optimizer.zero_grad()
-            self.optimizer_focal.zero_grad()
-            self.optimizer_pose.zero_grad()
+            # self.optimizer_focal.zero_grad()
+            # self.optimizer_pose.zero_grad()
             loss.backward()
             self.optimizer.step()
-            self.optimizer_focal.step()
-            self.optimizer_pose.step()
+            # self.optimizer_focal.step()
+            # self.optimizer_pose.step()
 
             self.iter_step += 1
             self.poses_iter_step += 1
