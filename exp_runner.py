@@ -68,8 +68,8 @@ class Runner:
             self.intrin_net = LearnIntrin(self.dataset.H, self.dataset.W, **self.conf['model.focal'], init_focal=self.dataset.focal).to(self.device)
             # learn pose for each image
             self.pose_param_net = LearnPose(self.dataset.n_images, **self.conf['model.pose'], init_c2w=self.dataset.pose_all).to(self.device)
-            # self.optimizer_focal = torch.optim.Adam(self.intrin_net.parameters(), lr=self.focal_lr)
-            # self.optimizer_pose = torch.optim.Adam(self.pose_param_net.parameters(), lr=self.pose_lr)
+            self.optimizer_focal = torch.optim.Adam(self.intrin_net.parameters(), lr=self.focal_lr)
+            self.optimizer_pose = torch.optim.Adam(self.pose_param_net.parameters(), lr=self.pose_lr)
 
             self.scheduler_focal = torch.optim.lr_scheduler.MultiStepLR(self.optimizer_focal, milestones=(self.warm_up_end, self.end_iter, self.step_size),
                                                                 gamma=self.focal_lr_gamma)
@@ -455,8 +455,54 @@ class Runner:
 
         img_fine = (np.concatenate(out_rgb_fine, axis=0).reshape([H, W, 3]) * 256).clip(0, 255).astype(np.uint8)
         return img_fine
+    
+    def show_cam_pose(self, iter_show=-1, random_color=True):
+        import open3d as o3d
+        from vis_cam_traj import draw_camera_frustum_geometry
+        '''Get focal'''
+        fxfy = self.intrin_net(0).cpu().detach().numpy()[0][0]
+        print('learned cam intrinsics:')
+        print('fxfy', fxfy)
 
-    def validate_mesh(self, world_space=False, resolution=256, threshold=0.0):
+        '''Get all poses in (N, 4, 4)'''
+        c2ws_est = torch.stack([self.pose_param_net(i) for i in range(self.dataset.n_images)])  # (N, 4, 4)
+
+        '''Frustum properties'''
+        frustum_length = 0.5
+        random_color = random_color
+        if random_color:
+            frustum_color = np.random.rand(self.dataset.n_images, 3)
+        else:
+            frustum_color = np.array([[249, 65, 68]], dtype=np.float32) / 255
+            frustum_color = np.tile(frustum_color, (self.dataset.n_images, 1))
+
+        '''Get frustums'''
+        frustum_est_list = draw_camera_frustum_geometry(c2ws_est.cpu().detach().cpu().numpy(), self.dataset.H, self.dataset.W,
+                                                        fxfy, fxfy,
+                                                        frustum_length, frustum_color)
+        
+        # gtposes
+        c2w_gt = self.dataset.pose_all
+        fx_gt = self.dataset.focal.cpu().detach()
+        gt_color = np.array([[0.0, 0.0, 0.0]], dtype=np.float32)
+        gt_color = np.tile(gt_color, (self.dataset.n_images, 1))
+        gt_est_list = draw_camera_frustum_geometry(c2w_gt.cpu().detach().cpu().numpy(), self.dataset.H, self.dataset.W,
+                                                        fx_gt, fx_gt,
+                                                        frustum_length, gt_color)
+
+        geometry_to_draw = []
+        geometry_to_draw.append(frustum_est_list)
+        geometry_to_draw.append(gt_est_list)
+        
+        # mesh
+        mesh = o3d.io.read_triangle_mesh(os.path.join(self.base_exp_dir, 'meshes', '{:0>8d}.ply'.format(self.iter_step)))
+        mesh.compute_vertex_normals()
+        geometry_to_draw.append(mesh)
+
+        o3d.visualization.draw_geometries(geometry_to_draw)
+
+
+    def validate_mesh(self, world_space=False, resolution=256, threshold=0.0):        
         bound_min = torch.tensor(self.dataset.object_bbox_min, dtype=torch.float32)
         bound_max = torch.tensor(self.dataset.object_bbox_max, dtype=torch.float32)
 
@@ -528,3 +574,7 @@ if __name__ == '__main__':
         img_idx_0 = int(img_idx_0)
         img_idx_1 = int(img_idx_1)
         runner.interpolate_view(img_idx_0, img_idx_1)
+    elif args.mode.startswith('showcam'):
+        _, iter_show = args.mode.split('_')
+        runner.load_checkpoint(('ckpt_{:0>6d}.pth').format(int(iter_show)))
+        runner.show_cam_pose(iter_show)

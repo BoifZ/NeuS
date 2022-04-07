@@ -176,7 +176,7 @@ class MixVisionTransformer(nn.Module):
     def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=1000, embed_dims=[64, 128, 256, 512],
                  num_heads=[1, 2, 4, 8], mlp_ratios=[4, 4, 4, 4], qkv_bias=False, qk_scale=None, drop_rate=0.,
                  attn_drop_rate=0., drop_path_rate=0., norm_layer=nn.LayerNorm,
-                 depths=[3, 4, 6, 3], sr_ratios=[8, 4, 2, 1], n_layers=4):
+                 depths=[3, 4, 6, 3], sr_ratios=[8, 4, 2, 1], n_layers=4, strides=[4,2,2,2]):
         super().__init__()
         self.num_classes = num_classes
         self.depths = depths
@@ -205,13 +205,13 @@ class MixVisionTransformer(nn.Module):
             # cur += depths[l]
 
         # patch_embed
-        self.patch_embed1 = OverlapPatchEmbed(img_size=img_size, patch_size=7, stride=4, in_chans=in_chans,
+        self.patch_embed1 = OverlapPatchEmbed(img_size=img_size, patch_size=7, stride=strides[0], in_chans=in_chans,
                                               embed_dim=embed_dims[0])
-        self.patch_embed2 = OverlapPatchEmbed(img_size=img_size // 4, patch_size=3, stride=2, in_chans=embed_dims[0],
+        self.patch_embed2 = OverlapPatchEmbed(img_size=img_size // 4, patch_size=3, stride=strides[1], in_chans=embed_dims[0],
                                               embed_dim=embed_dims[1])
-        self.patch_embed3 = OverlapPatchEmbed(img_size=img_size // 8, patch_size=3, stride=2, in_chans=embed_dims[1],
+        self.patch_embed3 = OverlapPatchEmbed(img_size=img_size // 8, patch_size=3, stride=strides[2], in_chans=embed_dims[1],
                                               embed_dim=embed_dims[2])
-        self.patch_embed4 = OverlapPatchEmbed(img_size=img_size // 16, patch_size=3, stride=2, in_chans=embed_dims[2],
+        self.patch_embed4 = OverlapPatchEmbed(img_size=img_size // 16, patch_size=3, stride=strides[3], in_chans=embed_dims[2],
                                               embed_dim=embed_dims[3])
 
         # transformer encoder
@@ -316,14 +316,23 @@ class DWConv(nn.Module):
         return x
 
 
+# depth= 0-1:[2, 2, 2, 2], 2:[3, 4, 6, 3], 3:[3, 4, 18, 3], 4:[3, 8, 27, 3], 5:[3, 6, 40, 3]
+# embed_dims= 0:[32, 64, 160, 256], 1-5:[64, 128, 320, 512]
+# class mit_b4(MixVisionTransformer):
+#     def __init__(self, **kwargs):
+#         super(mit_b4, self).__init__(
+#             patch_size=4, embed_dims=[64, 128, 320, 512], num_heads=[1, 2, 5, 8], mlp_ratios=[4, 4, 4, 4],
+#             qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), depths=[3, 8, 27, 3], sr_ratios=[8, 4, 2, 1],
+#             drop_rate=0.0, drop_path_rate=0.1)
+
+
 class mit_b4(MixVisionTransformer):
     def __init__(self, **kwargs):
         super(mit_b4, self).__init__(
             patch_size=4, embed_dims=[64, 128, 320, 512], num_heads=[1, 2, 5, 8], mlp_ratios=[4, 4, 4, 4],
             qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), depths=[3, 8, 27, 3], sr_ratios=[8, 4, 2, 1],
-            drop_rate=0.0, drop_path_rate=0.1)
-    # depth= 0-1:[2, 2, 2, 2], 2:[3, 4, 6, 3], 3:[3, 4, 18, 3], 4:[3, 8, 27, 3], 5:[3, 6, 40, 3]
-    # embed_dims= 0:[32, 64, 160, 256], 1-5:[64, 128, 320, 512]
+            drop_rate=0.0, drop_path_rate=0.1, strides=[1,1,1,1])
+
 
 if __name__ == '__main__':
     import pdb

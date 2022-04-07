@@ -62,9 +62,11 @@ class LearnIntrin(nn.Module):
         else:
             if self.order == 2:
                 # a**2 * W = fx  --->  a**2 = fx / W
-                coe_x = torch.tensor(torch.sqrt(init_focal / float(W)), requires_grad=False).float()
+                coe_x = torch.sqrt(init_focal/ float(W)).clone().detach().float().requires_grad_(True)
+                # coe_x = torch.tensor(torch.sqrt(init_focal / float(W)), requires_grad=False).float()
             elif self.order == 1:
                 # a * W = fx  --->  a = fx / W
+                coe_x = (init_focal/ float(W)).clone().detach().float().requires_grad_(True)
                 coe_x = torch.tensor(init_focal / float(W), requires_grad=False).float()
             else:
                 print('Focal init order need to be 1 or 2. Exit')
@@ -167,19 +169,19 @@ class RaysGenerator:
         self.masks_np = np.stack([self.cropping(cv.imread(im_name), crop_size=self.image_size) for im_name in self.masks_lis]) / 256.0
         self.depth_lis = depth_lis
         self.d_scale = 1
-        self.up_feats = nn.Upsample(size=image_size, mode='bilinear')
-        print(depth_lis[0])
+        self.up_feats = nn.Upsample(size=image_size, mode='bilinear', align_corners=True)
+        # print(depth_lis[0])
         self.depths_np = np.stack([np.squeeze(self.cropping(np.load(fname), crop_size=self.image_size, scale=self.d_scale)) for fname in self.depth_lis]) / 256.0
         # print(self.n_images)
 
         self.images = torch.from_numpy(self.images_np.astype(np.float32)).cpu()  # [n_images, H, W, 3]
         self.masks  = torch.from_numpy(self.masks_np.astype(np.float32)).cpu()   # [n_images, H, W, 3]
         self.depth_feats = torch.from_numpy(self.depths_np.astype(np.float32)).cpu()
-        print(self.depth_feats.shape)
+        # print(self.depth_feats.shape)
         if self.depth_feats.dim()==3:
             self.depth_feats = self.depth_feats.unsqueeze(1)
         self.depth_feats = self.up_feats(self.depth_feats)
-        print(self.depth_feats.shape)
+        # print(self.depth_feats.shape)
         self.depth_feats = self.depth_feats.permute(0,2,3,1)
         assert self.images.shape[1:3]==self.image_size, 'self.images in {} doesnot match self.image_size in {}'.format(self.images.shape, self.image_size)
         assert self.images.shape[:-1]==self.depth_feats.shape[:-1], 'self.images in {} doesnot match self.depth_feats in {}'.format(self.images.shape[:-1], self.depth_feats.shape[:-1])
