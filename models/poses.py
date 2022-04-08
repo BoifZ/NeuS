@@ -62,7 +62,8 @@ class LearnIntrin(nn.Module):
         else:
             if self.order == 2:
                 # a**2 * W = fx  --->  a**2 = fx / W
-                coe_x = torch.tensor(torch.sqrt(init_focal / float(W)), requires_grad=False).float()
+                # coe_x = torch.tensor(torch.sqrt(init_focal / float(W)), requires_grad=False).float()
+                coe_x = torch.sqrt(init_focal / float(W)).clone().detach().float().requires_grad_(True)
             elif self.order == 1:
                 # a * W = fx  --->  a = fx / W
                 coe_x = torch.tensor(init_focal / float(W), requires_grad=False).float()

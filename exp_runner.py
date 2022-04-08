@@ -214,12 +214,14 @@ class Runner:
                    mask_loss * self.mask_weight
 
             self.optimizer.zero_grad()
-            self.optimizer_focal.zero_grad()
-            self.optimizer_pose.zero_grad()
+            if self.learnable:
+                self.optimizer_focal.zero_grad()
+                self.optimizer_pose.zero_grad()
             loss.backward()
             self.optimizer.step()
-            self.optimizer_focal.step()
-            self.optimizer_pose.step()
+            if self.learnable:
+                self.optimizer_focal.step()
+                self.optimizer_pose.step()
 
             self.iter_step += 1
 
@@ -402,8 +404,10 @@ class Runner:
         normal_img = None
         if len(out_normal_fine) > 0:
             normal_img = np.concatenate(out_normal_fine, axis=0)
-            rot = np.linalg.inv(self.pose_param_net(idx)[:3, :3].detach().cpu().numpy())
-            # rot = np.linalg.inv(self.dataset.pose_all[idx, :3, :3].detach().cpu().numpy())
+            if self.learnable:
+                rot = np.linalg.inv(self.pose_param_net(idx)[:3, :3].detach().cpu().numpy())
+            else:
+                rot = np.linalg.inv(self.dataset.pose_all[idx, :3, :3].detach().cpu().numpy())
             normal_img = (np.matmul(rot[None, :, :], normal_img[:, :, None])
                           .reshape([H, W, 3, -1]) * 128 + 128).clip(0, 255)
 
