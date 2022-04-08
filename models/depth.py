@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 
 from mmcv.runner import load_checkpoint
-from models.depth_mit import mit_b4
+from depth_mit import mit_b4
 
 
 class SiLogLoss(nn.Module):
@@ -170,40 +170,72 @@ if __name__ == '__main__':
     n_images = len(images_lis)
     print('n_images:', n_images)
     
-    model = GLPDepth(max_depth=args.max_depth, is_train=False, n_layers=3).to(device)
+    # model = GLPDepth(max_depth=args.max_depth, is_train=False, n_layers=3).to(device)
+    # model_weight = torch.load(args.depth_ckpt)
+    # if 'module' in next(iter(model_weight.items()))[0]:
+    #     model_weight = OrderedDict((k[7:], v) for k, v in model_weight.items())
+    # model.load_state_dict(model_weight)
+    # model.eval()
+
+    # for im_name in tqdm(images_lis):
+    #     image = cv.imread(im_name)
+    #     image = cv.cvtColor(image, cv.COLOR_BGR2RGB)
+    #     image = cropping(image, crop_size=image_size)
+    #     image = to_tensor(image).to(device).unsqueeze(0)
+
+    #     with torch.no_grad():
+    #         pred = model(image)
+    #     # print(pred_d_numpy.shape)
+    #     enc_feats = pred['enc_feat']
+        
+    #     im_name = os.path.basename(im_name)
+    #     for idx, feat in enumerate(enc_feats):
+    #         feat_numpy = torch.sigmoid(feat).squeeze().cpu().numpy()
+    #         if not os.path.exists(os.path.join(result_path_feat, str(idx))):
+    #             os.makedirs(os.path.join(result_path_feat, str(idx)), exist_ok=True)
+    #         save_path = os.path.join(result_path_feat, str(idx), im_name[:-4]+'.npy')
+    #         np.save(save_path, feat_numpy)
+
+    #     pred_d = pred['pred_d']
+    #     pred_d_numpy = pred_d.squeeze().cpu().numpy()
+    #     depth_save_path = os.path.join(result_path_feat, im_name[:-4]+'.npy')
+    #     np.save(depth_save_path, pred_d_numpy)
+
+    #     pred_d_numpy = (pred_d_numpy / pred_d_numpy.max()) * 255
+    #     pred_d_numpy = pred_d_numpy.astype(np.uint8)
+    #     pred_d_color = cv.applyColorMap(pred_d_numpy, cv.COLORMAP_RAINBOW)
+    #     im_save_path = os.path.join(result_path_img, im_name)
+    #     cv.imwrite(im_save_path, pred_d_color)
+
+    model = mit_b4().to(device)
     model_weight = torch.load(args.depth_ckpt)
     if 'module' in next(iter(model_weight.items()))[0]:
-        model_weight = OrderedDict((k[7:], v) for k, v in model_weight.items())
+        model_weight = OrderedDict((k[15:], v) for k, v in model_weight.items() if 'encoder' in k)
     model.load_state_dict(model_weight)
     model.eval()
+    resolution_level = 4
 
     for im_name in tqdm(images_lis):
         image = cv.imread(im_name)
         image = cv.cvtColor(image, cv.COLOR_BGR2RGB)
         image = cropping(image, crop_size=image_size)
+        image = cv.resize(image, (image_size[1]//resolution_level, image_size[0]//resolution_level))
         image = to_tensor(image).to(device).unsqueeze(0)
+        # print(image.shape)
 
         with torch.no_grad():
             pred = model(image)
         # print(pred_d_numpy.shape)
-        enc_feats = pred['enc_feat']
+        enc_feats = pred
         
         im_name = os.path.basename(im_name)
         for idx, feat in enumerate(enc_feats):
-            feat_numpy = torch.sigmoid(feat).squeeze().cpu().numpy()
+            # feat_numpy = torch.sigmoid(feat).squeeze().cpu().numpy()
+            feat_numpy = feat.squeeze().cpu().numpy()
+            if feat_numpy.shape[-2:] != image.shape[-2:]:
+                break
+            # print(feat_numpy.shape)
             if not os.path.exists(os.path.join(result_path_feat, str(idx))):
                 os.makedirs(os.path.join(result_path_feat, str(idx)), exist_ok=True)
             save_path = os.path.join(result_path_feat, str(idx), im_name[:-4]+'.npy')
             np.save(save_path, feat_numpy)
-
-        pred_d = pred['pred_d']
-        pred_d_numpy = pred_d.squeeze().cpu().numpy()
-        depth_save_path = os.path.join(result_path_feat, im_name[:-4]+'.npy')
-        np.save(depth_save_path, pred_d_numpy)
-
-        pred_d_numpy = (pred_d_numpy / pred_d_numpy.max()) * 255
-        pred_d_numpy = pred_d_numpy.astype(np.uint8)
-        pred_d_color = cv.applyColorMap(pred_d_numpy, cv.COLORMAP_RAINBOW)
-        im_save_path = os.path.join(result_path_img, im_name)
-        cv.imwrite(im_save_path, pred_d_color)
-

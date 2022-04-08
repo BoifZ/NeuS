@@ -168,22 +168,22 @@ class RaysGenerator:
         self.masks_lis = msk_lis
         self.masks_np = np.stack([self.cropping(cv.imread(im_name), crop_size=self.image_size) for im_name in self.masks_lis]) / 256.0
         self.depth_lis = depth_lis
-        self.d_scale = 1
-        self.up_feats = nn.Upsample(size=image_size, mode='bilinear', align_corners=True)
+        # self.d_scale = 1
+        # self.up_feats = nn.Upsample(size=image_size, mode='bilinear', align_corners=True)
         # print(depth_lis[0])
-        self.depths_np = np.stack([np.squeeze(self.cropping(np.load(fname), crop_size=self.image_size, scale=self.d_scale)) for fname in self.depth_lis]) / 256.0
+        self.depths_np = np.stack([np.squeeze(np.load(fname)) for fname in self.depth_lis]) / 256.0
         # print(self.n_images)
 
         self.images = torch.from_numpy(self.images_np.astype(np.float32)).cpu()  # [n_images, H, W, 3]
         self.masks  = torch.from_numpy(self.masks_np.astype(np.float32)).cpu()   # [n_images, H, W, 3]
         self.depth_feats = torch.from_numpy(self.depths_np.astype(np.float32)).cpu()
-        # print(self.depth_feats.shape)
+        print(self.depth_feats.shape)
         if self.depth_feats.dim()==3:
             self.depth_feats = self.depth_feats.unsqueeze(1)
-        self.depth_feats = self.up_feats(self.depth_feats)
-        # print(self.depth_feats.shape)
+        # self.depth_feats = self.up_feats(self.depth_feats)
         self.depth_feats = self.depth_feats.permute(0,2,3,1)
-        assert self.images.shape[1:3]==self.image_size, 'self.images in {} doesnot match self.image_size in {}'.format(self.images.shape, self.image_size)
+        print(self.depth_feats.shape)
+        # assert self.images.shape[1:3]==self.image_size, 'self.images in {} doesnot match self.image_size in {}'.format(self.images.shape, self.image_size)
         assert self.images.shape[:-1]==self.depth_feats.shape[:-1], 'self.images in {} doesnot match self.depth_feats in {}'.format(self.images.shape[:-1], self.depth_feats.shape[:-1])
         self.H, self.W = self.images.shape[1], self.images.shape[2]
         self.image_pixels = self.H * self.W
@@ -212,7 +212,7 @@ class RaysGenerator:
         print('Load data: End')
 
     # kb cropping
-    def cropping(self, img, crop_size=(352, 1216), scale=1):
+    def cropping(self, img, crop_size=(352, 1216), scale=1, resolution_level=4):
         h_im, w_im = img.shape[:2]
         
         margin_top = max(0, int(h_im - crop_size[0]//scale))
@@ -222,6 +222,7 @@ class RaysGenerator:
 
         img = img[margin_top: margin_bottom,
                   margin_left: margin_right]
+        img = cv.resize(img, (crop_size[1] // resolution_level, crop_size[0] // resolution_level))
         return img
 
 

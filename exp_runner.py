@@ -12,11 +12,11 @@ from shutil import copyfile
 from icecream import ic
 from tqdm import tqdm
 from pyhocon import ConfigFactory
-from models.dataset import Dataset
+from models.dataset import Dataset, load_K_Rt_from_P
 from models.fields import RenderingNetwork, SDFNetwork, SingleVarianceNetwork, NeRF
 from models.renderer import NeuSRenderer
 from models.poses import LearnPose, LearnIntrin, RaysGenerator
-from models.depth import SiLogLoss
+# from models.depth import SiLogLoss
 
 
 class Runner:
@@ -102,7 +102,7 @@ class Runner:
             # add depth_feats+
             self.depth_weight = self.conf.get_float('train.depth_weight')
             self.depth_network = RenderingNetwork(**self.conf['model.depth_extract_network']).to(self.device)
-            self.d_loss = SiLogLoss()
+            # self.d_loss = SiLogLoss()
             params_to_train += list(self.depth_network.parameters())
         else:
             self.depth_network = None
@@ -217,12 +217,14 @@ class Runner:
             # print(depth_loss)
             # print(loss)
             self.optimizer.zero_grad()
-            # self.optimizer_focal.zero_grad()
-            # self.optimizer_pose.zero_grad()
+            if self.learnable:
+                self.optimizer_focal.zero_grad()
+                self.optimizer_pose.zero_grad()
             loss.backward()
             self.optimizer.step()
-            # self.optimizer_focal.step()
-            # self.optimizer_pose.step()
+            if self.learnable:
+                self.optimizer_focal.step()
+                self.optimizer_pose.step()
 
             self.iter_step += 1
             self.poses_iter_step += 1
@@ -456,51 +458,86 @@ class Runner:
         img_fine = (np.concatenate(out_rgb_fine, axis=0).reshape([H, W, 3]) * 256).clip(0, 255).astype(np.uint8)
         return img_fine
     
+    def get_gt_poses(self, cameras_sphere, cam_num, color=None, length=0.5):
+        from vis_cam_traj import draw_camera_frustum_geometry
+
+        if color is None:
+            color = np.random.rand(1, 3)
+        camera_dict = np.load(cameras_sphere)
+        intrinsics_all = []
+        pose_all = []
+        for idx in range(cam_num):
+            scale_mat = camera_dict['scale_mat_%d' % idx].astype(np.float32)
+            world_mat = camera_dict['world_mat_%d' % idx].astype(np.float32)
+            P = world_mat @ scale_mat
+            P = P[:3, :4]
+            intrinsics, pose = load_K_Rt_from_P(None, P)
+            intrinsics_all.append(intrinsics.astype(np.float32))
+            pose_all.append(pose.astype(np.float32))
+
+        c2w_gt = np.array(pose_all)
+        fx_gt = intrinsics_all[0][0, 0]
+        gt_color = np.array([color], dtype=np.float32)
+        gt_color = np.tile(gt_color, (cam_num, 1))
+        gt_est_list = draw_camera_frustum_geometry(c2w_gt, self.dataset.H, self.dataset.W,
+                                                        fx_gt, fx_gt,
+                                                        length, gt_color)
+        return gt_est_list
+    
     def show_cam_pose(self, iter_show=-1, random_color=True):
         import open3d as o3d
         from vis_cam_traj import draw_camera_frustum_geometry
+
+        cam_num = 33
+        # cam_num = self.dataset.n_images
+
         '''Get focal'''
         fxfy = self.intrin_net(0).cpu().detach().numpy()[0][0]
         print('learned cam intrinsics:')
         print('fxfy', fxfy)
 
         '''Get all poses in (N, 4, 4)'''
-        c2ws_est = torch.stack([self.pose_param_net(i) for i in range(self.dataset.n_images)])  # (N, 4, 4)
+        c2ws_est = torch.stack([self.pose_param_net(i) for i in range(cam_num)])  # (N, 4, 4)
 
         '''Frustum properties'''
         frustum_length = 0.5
         random_color = random_color
+        all_color = np.random.rand(3, 3)
         if random_color:
-            frustum_color = np.random.rand(self.dataset.n_images, 3)
+            frustum_color = np.random.rand(cam_num, 3)
         else:
-            frustum_color = np.array([[249, 65, 68]], dtype=np.float32) / 255
-            frustum_color = np.tile(frustum_color, (self.dataset.n_images, 1))
+            # frustum_color = np.array([[249, 65, 68]], dtype=np.float32) / 255
+            frustum_color = np.array([all_color[0]], dtype=np.float32)
+            frustum_color = np.tile(frustum_color, (cam_num, 1))
 
         '''Get frustums'''
         frustum_est_list = draw_camera_frustum_geometry(c2ws_est.cpu().detach().cpu().numpy(), self.dataset.H, self.dataset.W,
                                                         fxfy, fxfy,
                                                         frustum_length, frustum_color)
         
-        # gtposes
-        c2w_gt = self.dataset.pose_all
-        fx_gt = self.dataset.focal.cpu().detach()
-        gt_color = np.array([[0.0, 0.0, 0.0]], dtype=np.float32)
-        gt_color = np.tile(gt_color, (self.dataset.n_images, 1))
-        gt_est_list = draw_camera_frustum_geometry(c2w_gt.cpu().detach().cpu().numpy(), self.dataset.H, self.dataset.W,
-                                                        fx_gt, fx_gt,
-                                                        frustum_length, gt_color)
+        # init poses
+        c2w_init = self.dataset.pose_all
+        fx_init = self.dataset.focal.cpu().detach()
+        init_color = np.array([all_color[1]], dtype=np.float32)
+        init_color = np.tile(init_color, (cam_num, 1))
+        init_est_list = draw_camera_frustum_geometry(c2w_init.cpu().detach().cpu().numpy(), self.dataset.H, self.dataset.W,
+                                                        fx_init, fx_init,
+                                                        frustum_length, init_color)
+
+        # gt poses
+        gt_est_list = self.get_gt_poses(os.path.join('./exp/teeth_noise', 'cameras_sphere.npz'), cam_num, color=all_color[2], length=frustum_length)
 
         geometry_to_draw = []
         geometry_to_draw.append(frustum_est_list)
+        geometry_to_draw.append(init_est_list)
         geometry_to_draw.append(gt_est_list)
         
         # mesh
-        mesh = o3d.io.read_triangle_mesh(os.path.join(self.base_exp_dir, 'meshes', '{:0>8d}.ply'.format(self.iter_step)))
+        mesh = o3d.io.read_triangle_mesh(os.path.join(self.base_exp_dir, 'meshes', '{:0>8d}.ply'.format(iter_show)))
         mesh.compute_vertex_normals()
         geometry_to_draw.append(mesh)
 
         o3d.visualization.draw_geometries(geometry_to_draw)
-
 
     def validate_mesh(self, world_space=False, resolution=256, threshold=0.0):        
         bound_min = torch.tensor(self.dataset.object_bbox_min, dtype=torch.float32)
@@ -576,5 +613,5 @@ if __name__ == '__main__':
         runner.interpolate_view(img_idx_0, img_idx_1)
     elif args.mode.startswith('showcam'):
         _, iter_show = args.mode.split('_')
-        runner.load_checkpoint(('ckpt_{:0>6d}.pth').format(int(iter_show)))
-        runner.show_cam_pose(iter_show)
+        runner.load_pnf_checkpoint(('pnf_{:0>6d}.pth').format(int(iter_show)))
+        runner.show_cam_pose(int(iter_show))
