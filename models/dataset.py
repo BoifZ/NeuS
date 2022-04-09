@@ -59,7 +59,7 @@ class Dataset:
         # print(self.n_images)
         # self.images = torch.from_numpy(self.images_np.astype(np.float32)).cpu()  # [n_images, H, W, 3]
         # self.masks  = torch.from_numpy(self.masks_np.astype(np.float32)).cpu()   # [n_images, H, W, 3]
-        self.depth_lis = sorted(glob(os.path.join(img_folder, 'depth_feats/*.npy')))
+        self.depth_lis = sorted(glob(os.path.join(img_folder, 'depth_feats/0/*.npy')))
         self.H, self.W = cv.imread(self.images_lis[0]).shape[:2]
         self.image_pixels = self.H * self.W
 
@@ -176,7 +176,7 @@ class Dataset:
         far = mid + 1.0
         return near, far
 
-    def image_at(self, idx, resolution_level):
-        img = self.images_np[idx]
-        return (cv.resize(img, (self.W // resolution_level, self.H // resolution_level))*255).clip(0, 255)
+    # def image_at(self, idx, resolution_level):
+    #     img = self.images_np[idx]
+    #     return (cv.resize(img, (self.W // resolution_level, self.H // resolution_level))*255).clip(0, 255)
 
